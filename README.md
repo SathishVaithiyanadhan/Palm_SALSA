@@ -72,9 +72,9 @@ The following data is required to create the chemistry driver for the PALM simul
 
    - Edit the __main__ block in palm_salsa_driver.py to set:
 
-        * static_file: Path to the PALM static driver file (e.g., /home/vaithisa/GEO4PALM-main/JOBS/Augsburg_10/OUTPUT/Augsburg_3_static).
-        * tiff_dir: Directory containing downscaled GRETA GeoTIFF files (e.g., /home/vaithisa/Downscale_Emissions/Downscale_Winter_10m).
-        * output_file (driver): Path for the output NetCDF file (e.g., /home/vaithisa/Palm_SALSA/Augsburg_3_salsa).
+        * static_file: Path to the PALM static driver file.
+        * tiff_dir: Directory containing downscaled GRETA GeoTIFF files.
+        * output_file (driver): Path for the output NetCDF file.
         * active_categories: List of emission sectors to process (e.g., ['F_RoadTransport', 'C_OtherStationaryComb', etc.,]).
 
 2. Run Main Script

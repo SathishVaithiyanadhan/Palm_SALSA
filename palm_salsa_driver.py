@@ -1,4 +1,3 @@
-###
 import os
 import glob
 import math
@@ -53,6 +52,23 @@ def pattern_match(band_name, patterns):
         if re.match(regex_pattern, band_name):
             return True
     return False
+
+def extract_hour_from_band_name(band_name):
+    """
+    Extract hour information from band name.
+    Expected format: F_RoadTransport_h01_YYYYMMDD or similar
+    Returns hour as integer (0-23) or None if not found.
+    """
+    if not band_name:
+        return None
+    
+    # Try to find hour pattern: h01, h02, ..., h24
+    hour_match = re.search(r'h(\d{1,2})', band_name)
+    if hour_match:
+        hour = int(hour_match.group(1))
+        # Convert 1-24 to 0-23 format
+        return hour - 1 if hour >= 1 else 0
+    return None
 
 def get_crs_from_netcdf(nc_file):
     """
@@ -192,50 +208,43 @@ class SalsaDriver:
         x[:] = self.static_x
         x.units = "m"
         x.long_name = "distance to origin in x-direction"
-        x.standard_name = "projection_x_coordinate"
 
         y = self.nc_file.createVariable("y", "f4", ("y",))
         y[:] = self.static_y
         y.units = "m"
         y.long_name = "distance to origin in y-direction"
-        y.standard_name = "projection_y_coordinate"
-
-        # Dimension variables
-        ncat = self.nc_file.createVariable("ncat", "i4", ("ncat",))
-        ncat[:] = np.arange(1, self.nncat + 1)  # [1, 2, 3]
-        ncat.units = ""
-        ncat.long_name = "emission category index"
-        ncat.standard_name = "category_index"
-
-        max_string_length = self.nc_file.createVariable("max_string_length", "i4", ("max_string_length",))
-        max_string_length[:] = np.arange(1, self.nmax_string_length + 1)  # [1, 2, ..., 25]
-        max_string_length.units = ""
-        max_string_length.long_name = "character position in string arrays"
-        max_string_length.standard_name = "string_character_index"
-
-        composition_index = self.nc_file.createVariable("composition_index", "i4", ("composition_index",))
-        composition_index[:] = np.arange(1, self.ncomposition_index + 1)  # [1, 2, 3, 4, 5, 6, 7]
-        composition_index.units = ""
-        composition_index.long_name = "aerosol composition index"
-        composition_index.standard_name = "composition_index"
 
         t = self.nc_file.createVariable("time", "f4", ("time",))
         t[:] = np.arange(0, 24 * 3600, 3600)
         t.units = "s"
         t.long_name = "time in seconds"
-        t.standard_name = "time"
 
         Dmid = self.nc_file.createVariable("Dmid", "f4", ("Dmid",))
         Dmid[:] = np.linspace(0.01e-6, 2.5e-6, 8)  # dummy bins
         Dmid.units = "m"
-        Dmid.long_name = "midpoint diameter of aerosol size bins"
-        Dmid.standard_name = "diameter"
+
+        # === Dimension coordinate variables ===
+        # Create coordinate variables for categorical dimensions
+        ncat_coord = self.nc_file.createVariable("ncat", "i4", ("ncat",))
+        ncat_coord[:] = np.arange(1, self.nncat + 1)  # 1, 2, 3
+        ncat_coord.units = ""
+        ncat_coord.long_name = "emission category index"
+        
+        comp_index_coord = self.nc_file.createVariable("composition_index", "i4", ("composition_index",))
+        comp_index_coord[:] = np.arange(1, self.ncomposition_index + 1)  # 1, 2, 3, 4, 5, 6, 7
+        comp_index_coord.units = ""
+        comp_index_coord.long_name = "composition index"
+        
+        max_str_len_coord = self.nc_file.createVariable("max_string_length", "i4", ("max_string_length",))
+        max_str_len_coord[:] = np.arange(1, self.nmax_string_length + 1)  # 1, 2, 3, ..., 25
+        max_str_len_coord.units = ""
+        max_str_len_coord.long_name = "maximum string length"
 
     def add_variables(self):
         print("Adding emission variables...")
         print(f"Active categories: {self.active_categories}")
 
-        # === Emission category names ===
+        # === Emission categories ===
         emission_category_name_list = ["traffic exhaust", "road dust", "wood combustion"]
         nc_emission_category_name = self.nc_file.createVariable(
             "emission_category_name", "S1", ("ncat", "max_string_length")
@@ -245,14 +254,13 @@ class SalsaDriver:
             nc_emission_category_name[i, :] = np.array(list(chars), dtype="S1")
         nc_emission_category_name.long_name = "emission category name"
 
-        # === Emission category index ===
+        # Emission category index (as a data variable, not coordinate)
         nc_emission_category_index = self.nc_file.createVariable(
-            "emission_category_index", "i4", ("ncat",)
+            "emission_category_index", "i1", ("ncat",)
         )
-        nc_emission_category_index[:] = np.arange(1, self.nncat + 1)  # [1, 2, 3]
-        nc_emission_category_index.units = ""
+        nc_emission_category_index[:] = np.arange(1, self.nncat + 1)  # 1-indexed
         nc_emission_category_index.long_name = "emission category index"
-        nc_emission_category_index.standard_name = "category_index"
+        nc_emission_category_index.units = ""
 
         # === Composition names ===
         composition_name_list = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3"]
@@ -266,6 +274,7 @@ class SalsaDriver:
         nc_composition_name.long_name = "aerosol composition name"
 
         # === Emission mass fractions ===
+        # Define default mass fractions (these should be customized based on your data)
         emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index))
         # Traffic exhaust: mostly OC, BC, some NH3
         emission_mass_fracs[0, :] = [0.0, 0.5, 0.3, 0.0, 0.0, 0.0, 0.2]  # H2SO4, OC, BC, DU, SS, HNO3, NH3
@@ -280,10 +289,12 @@ class SalsaDriver:
         nc_emission_mass_fracs[:] = emission_mass_fracs
         nc_emission_mass_fracs.long_name = "mass fractions of chemical components in aerosol emissions"
         nc_emission_mass_fracs.units = "1"
-        nc_emission_mass_fracs.standard_name = "mass_fraction"
+        nc_emission_mass_fracs.coordinates = "ncat composition_index"
 
         # === Emission number fractions ===
+        # Define default size distribution (these should be customized based on your data)
         emission_number_fracs = np.zeros((self.nncat, 8))
+        # All categories use a log-normal distribution centered around 0.1 µm
         for i in range(self.nncat):
             emission_number_fracs[i, :] = [0.1, 0.2, 0.3, 0.2, 0.1, 0.05, 0.03, 0.02]
             emission_number_fracs[i, :] /= np.sum(emission_number_fracs[i, :])  # Normalize to sum=1
@@ -294,7 +305,7 @@ class SalsaDriver:
         nc_emission_number_fracs[:] = emission_number_fracs
         nc_emission_number_fracs.long_name = "number fractions of aerosol size bins in aerosol emissions"
         nc_emission_number_fracs.units = "1"
-        nc_emission_number_fracs.standard_name = "number_fraction"
+        nc_emission_number_fracs.coordinates = "ncat Dmid"
 
         # === Aerosol emissions ===
         nc_aerosol_emission_values = self.nc_file.createVariable(
@@ -305,32 +316,30 @@ class SalsaDriver:
         nc_aerosol_emission_values.long_name = "aerosol emission values"
         nc_aerosol_emission_values.source = "Based on Kumar et al., 2009: Comparative study of measured and modelled number concentrations of nanoparticles in an urban street canyon"
         nc_aerosol_emission_values.lod = 2
-        nc_aerosol_emission_values.standard_name = "aerosol_emission"
+        nc_aerosol_emission_values.coordinates = "time y x ncat"
 
-        # --- Initialize arrays for each hour ---
+        # --- Initialize arrays for each hour and category ---
+        # Create separate arrays for each emission category and each hour
         traffic_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         road_dust_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         wood_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         
-        # Define which species to process and how to map them
+        # Define which species to process and how to map them to categories
         species_mapping = {
-            "oc": "OC",
-            "bc": "BC", 
-            "na": "SS",
-            "nh3": "NH3",
-            "pb": "DU",
-            "cd": "DU",
-            "hg": "DU", 
-            "as": "DU",
-            "ni": "DU",
-            "othmin": "DU"
+            "oc": {"target": "OC", "category": [0, 2]},  # OC goes to traffic (0) and wood (2)
+            "bc": {"target": "BC", "category": [0, 2]},  # BC goes to traffic (0) and wood (2)
+            "na": {"target": "SS", "category": []},      # SS not assigned to any category
+            "nh3": {"target": "NH3", "category": [0]},   # NH3 goes to traffic (0)
+            "pb": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
+            "cd": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
+            "hg": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
+            "as": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
+            "ni": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
+            "othmin": {"target": "DU", "category": [1]}  # DU goes to road dust (1)
         }
         
-        # Define weights for splitting OC and BC between traffic and wood combustion
-        traffic_weight = 0.7  # 70% of OC/BC to traffic exhaust
-        wood_weight = 0.3    # 30% of OC/BC to wood combustion
-        
         # Process each TIFF file
+        processed_files = 0
         for tiff_file in glob.glob(os.path.join(self.tiff_dir, "emission_*_temporal.tif")):
             species = os.path.basename(tiff_file).split("_")[1].lower()
             
@@ -340,76 +349,69 @@ class SalsaDriver:
                 continue
                 
             print(f"Processing {species} from {tiff_file}")
+            processed_files += 1
             
             # Get all band names from the TIFF file
             band_names = self.get_band_names(tiff_file)
             if not band_names or all(name is None for name in band_names):
-                print(f"Warning: No valid band names found in {tiff_file}, assuming 24 hourly bands")
-                band_names = [f"F_RoadTransport_h{str(i).zfill(2)}_YYYYMMDD" for i in range(1, 25)]
-                band_indices = [(i, i-1) for i in range(1, 25)]  # (band_index, hour)
-            else:
-                # Filter bands based on active categories and hour format
-                band_indices = []
-                for i, band_name in enumerate(band_names, 1):
-                    if band_name and pattern_match(band_name, self.active_categories):
-                        # Extract hour from band name (e.g., h01 to h24)
-                        match = re.search(r'h(\d{2})', band_name)
-                        if match:
-                            hour_str = match.group(1)
-                            try:
-                                hour_num = int(hour_str)
-                                if 1 <= hour_num <= 24:
-                                    band_indices.append((i, hour_num - 1))  # Store (band_index, hour)
-                                    print(f"  Including band {i}: {band_name} (hour {hour_num})")
-                                else:
-                                    print(f"  Skipping band {i}: {band_name} (invalid hour {hour_num})")
-                            except ValueError:
-                                print(f"  Skipping band {i}: {band_name} (cannot parse hour)")
-                        else:
-                            print(f"  Skipping band {i}: {band_name} (no hour information)")
+                print(f"Warning: No band names found in {tiff_file}, skipping")
+                continue
             
-            if not band_indices:
-                print(f"Warning: No bands match active categories or hour format in {tiff_file}")
+            # Process each band that matches active categories and has valid hour info
+            target_species = species_mapping[species]["target"]
+            target_categories = species_mapping[species]["category"]
+            
+            if not target_categories:
+                print(f"Warning: Species {species} not assigned to any emission category, skipping")
                 continue
                 
-            # Process each selected band
-            target_species = species_mapping[species]
-            for band_idx, hour in band_indices:
-                if hour >= self.ntime:
-                    print(f"Warning: Hour {hour} exceeds available time steps, skipping band {band_idx}")
+            for band_idx, band_name in enumerate(band_names, 1):
+                if not band_name:
                     continue
                     
-                print(f"  Processing hour {hour} from band {band_idx}")
+                # Check if band matches active categories
+                if not pattern_match(band_name, self.active_categories):
+                    continue
+                
+                # Extract hour from band name
+                hour = extract_hour_from_band_name(band_name)
+                if hour is None or hour >= self.ntime:
+                    print(f"Warning: Could not extract valid hour from band '{band_name}', skipping")
+                    continue
+                
+                print(f"  Processing hour {hour} from band {band_idx}: {band_name}")
                 
                 # Crop the TIFF to match the static domain for this band
                 arr = self.crop_tiff_to_static_domain(tiff_file, band_idx)
                 converted_arr = mass_to_number(arr, target_species)
                 
-                # Check if the converted array contains non-zero values
-                if np.all(converted_arr == 0):
-                    print(f"  Warning: Converted array for {tiff_file}, band {band_idx} (hour {hour}) is all zeros")
-                
                 # Fix orientation
                 converted_arr = np.flipud(converted_arr)
                 
-                # Assign to emission categories based on species and category
-                if 'F_RoadTransport' in self.active_categories and target_species in ["OC", "BC", "NH3"]:
-                    traffic_by_hour[hour, :, :] += converted_arr * (traffic_weight if target_species in ["OC", "BC"] else 1.0)
-                    if target_species in ["OC", "BC"]:
-                        wood_by_hour[hour, :, :] += converted_arr * wood_weight
-                if 'C_OtherStationaryComb' in self.active_categories and target_species in ["OC", "BC"]:
-                    wood_by_hour[hour, :, :] += converted_arr
-                if target_species == "DU":
-                    road_dust_by_hour[hour, :, :] += converted_arr
+                # Add to the appropriate emission categories
+                for category in target_categories:
+                    if category == 0:  # Traffic exhaust
+                        traffic_by_hour[hour, :, :] += converted_arr
+                    elif category == 1:  # Road dust
+                        road_dust_by_hour[hour, :, :] += converted_arr
+                    elif category == 2:  # Wood combustion
+                        wood_by_hour[hour, :, :] += converted_arr
 
-        # --- Check for non-zero values ---
-        if np.all(traffic_by_hour == 0):
-            print("Warning: traffic_by_hour contains all zeros")
-        if np.all(road_dust_by_hour == 0):
-            print("Warning: road_dust_by_hour contains all zeros")
-        if np.all(wood_by_hour == 0):
-            print("Warning: wood_by_hour contains all zeros")
+        print(f"Processed {processed_files} TIFF files with emission data")
         
+        # Check if we have any data
+        total_traffic = np.sum(traffic_by_hour)
+        total_road_dust = np.sum(road_dust_by_hour)
+        total_wood = np.sum(wood_by_hour)
+        
+        print(f"Total emissions by category:")
+        print(f"  Traffic exhaust: {total_traffic:.2e} #/m²/s")
+        print(f"  Road dust: {total_road_dust:.2e} #/m²/s")
+        print(f"  Wood combustion: {total_wood:.2e} #/m²/s")
+        
+        if total_traffic == 0 and total_road_dust == 0 and total_wood == 0:
+            print("WARNING: All emission values are zero! Check your input data and active categories.")
+
         # --- Assign to final output array ---
         aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat))
 
@@ -466,7 +468,7 @@ class SalsaDriver:
             return left, bottom, right, top  # Return original if conversion fails
 
     def crop_tiff_to_static_domain(self, tiff_file, band_idx=1):
-        """Crop TIFF data to match the static domain extent for a specific band"""
+        """Crop TIFF data to match the static domain extremet for a specific band"""
         # Get TIFF extent and transform
         tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_transform, tiff_crs = self.get_tiff_extent(tiff_file)
         
@@ -515,7 +517,7 @@ class SalsaDriver:
                     zoom_factors = (self.ny / arr.shape[0], self.nx / arr.shape[1])
                     arr = zoom(arr, zoom_factors, order=1)  # linear interpolation
                 else:
-                    print(f"Warning: Empty array after cropping for {tiff_file}, band {band_idx}")
+                    print(f"Warning: Empty array after cropping for {tiff_file}")
                     arr = np.zeros((self.ny, self.nx))
             
             return arr
@@ -523,9 +525,7 @@ class SalsaDriver:
     def get_band_names(self, tiff_file):
         """Get all band names from a TIFF file"""
         with rasterio.open(tiff_file) as src:
-            band_names = src.descriptions
-            print(f"Found {len(band_names)} bands in {tiff_file}: {band_names}")
-            return band_names
+            return src.descriptions
 
     def finalize(self):
         print("Closing files...")
@@ -537,15 +537,25 @@ if __name__ == "__main__":
     static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augsburg_10/OUTPUT/Augsburg_3_static"
     tiff_dir = "/home/vaithisa/Downscale_Emissions/Downscale_Winter_10m"
     
-    # Define which categories to process (using wildcard patterns)
+    # Define which categories to process
     active_categories = [
-        'F_RoadTransport',
-        'C_OtherStationaryComb',
+        'A_PublicPower', 
+        'B_Industry', 
+        'C_OtherStationaryComb', 
+        #'D_Fugitives',
+        #'E_Solvents', 
+        'F_RoadTransport', 
+        #'G_Shipping', 
+        #'H_Aviation',
+        #'I_OffRoad', 
+        #'J_Waste', 
+        #'K_AgriLivestock', 
+        #'L_AgriOther',
+        #'SumAllSectors'
     ]
     
-    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_3_salsa", active_categories)
+    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_32_salsa", active_categories)
     driver.write_global_attributes()
     driver.define_dimensions()
     driver.add_variables()
     driver.finalize()
-###
