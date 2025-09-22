@@ -1,3 +1,4 @@
+###parallel processing version
 import os
 import glob
 import math
@@ -9,6 +10,9 @@ from netCDF4 import Dataset
 from rasterio.windows import Window
 from scipy.ndimage import zoom
 from pyproj import Transformer, CRS
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import pickle
 
 # === Species properties for mass → number conversion ===
 species_properties = {
@@ -134,6 +138,213 @@ def extract_static_domain(static_nc):
         params['east'], params['north'])
         
     return params
+
+class TiffProcessor:
+    """Helper class to process TIFF files in parallel"""
+    
+    def __init__(self, static_params, static_crs, active_categories, nx, ny, ntime):
+        self.static_params = static_params
+        self.static_crs = static_crs
+        self.active_categories = active_categories
+        self.nx = nx
+        self.ny = ny
+        self.ntime = ntime
+        
+        # Extract domain boundaries
+        self.static_xmin = static_params['west']
+        self.static_xmax = static_params['east']
+        self.static_ymin = static_params['south']
+        self.static_ymax = static_params['north']
+    
+    def process_single_file(self, tiff_file):
+        """Process a single TIFF file - this runs in parallel"""
+        species = os.path.basename(tiff_file).split("_")[1].lower()
+        
+        # Species mapping
+        species_mapping = {
+            "oc": {"target": "OC", "category": [0, 2]},
+            "bc": {"target": "BC", "category": [0, 2]},
+            "na": {"target": "SS", "category": []},
+            "nh3": {"target": "NH3", "category": [0]},
+            "pb": {"target": "DU", "category": [1]},
+            "cd": {"target": "DU", "category": [1]},
+            "hg": {"target": "DU", "category": [1]},
+            "as": {"target": "DU", "category": [1]},
+            "ni": {"target": "DU", "category": [1]},
+            "othmin": {"target": "DU", "category": [1]}
+        }
+        
+        # Skip species that are not in our mapping
+        if species not in species_mapping:
+            print(f"Skipping {species}, not mapped to any aerosol species.")
+            return None
+            
+        target_species = species_mapping[species]["target"]
+        target_categories = species_mapping[species]["category"]
+        
+        if not target_categories:
+            print(f"Warning: Species {species} not assigned to any emission category, skipping")
+            return None
+        
+        print(f"Processing {species} from {tiff_file}")
+        
+        # Get all band names from the TIFF file
+        band_names = self.get_band_names(tiff_file)
+        if not band_names or all(name is None for name in band_names):
+            print(f"Warning: No band names found in {tiff_file}, skipping")
+            return None
+        
+        # Initialize arrays for this file
+        traffic_by_hour = np.zeros((self.ntime, self.ny, self.nx))
+        road_dust_by_hour = np.zeros((self.ntime, self.ny, self.nx))
+        wood_by_hour = np.zeros((self.ntime, self.ny, self.nx))
+        
+        # Process each band
+        for band_idx, band_name in enumerate(band_names, 1):
+            if not band_name:
+                continue
+                
+            # Check if band matches active categories
+            if not pattern_match(band_name, self.active_categories):
+                continue
+            
+            # Extract hour from band name
+            hour = extract_hour_from_band_name(band_name)
+            if hour is None or hour >= self.ntime:
+                print(f"Warning: Could not extract valid hour from band '{band_name}', skipping")
+                continue
+            
+            print(f"  Processing hour {hour} from band {band_idx}: {band_name}")
+            
+            # Crop the TIFF to match the static domain for this band
+            arr = self.crop_tiff_to_static_domain(tiff_file, band_idx)
+            converted_arr = mass_to_number(arr, target_species)
+            
+            # Fix orientation
+            converted_arr = np.flipud(converted_arr)
+            
+            # Add to the appropriate emission categories
+            for category in target_categories:
+                if category == 0:  # Traffic exhaust
+                    traffic_by_hour[hour, :, :] += converted_arr
+                elif category == 1:  # Road dust
+                    road_dust_by_hour[hour, :, :] += converted_arr
+                elif category == 2:  # Wood combustion
+                    wood_by_hour[hour, :, :] += converted_arr
+        
+        return {
+            'traffic': traffic_by_hour,
+            'road_dust': road_dust_by_hour,
+            'wood': wood_by_hour,
+            'species': species,
+            'file': tiff_file
+        }
+    
+    def get_tiff_extent(self, tiff_file):
+        """Get the spatial extent of a TIFF file and its CRS"""
+        with rasterio.open(tiff_file) as src:
+            transform = src.transform
+            width = src.width
+            height = src.height
+            tiff_crs = src.crs.to_string() if src.crs else config_proj
+            
+            # Calculate corner coordinates in the TIFF's native CRS
+            left = transform[2]
+            top = transform[5]
+            right = left + transform[0] * width
+            bottom = top + transform[4] * height
+            
+            return left, bottom, right, top, transform, tiff_crs
+
+    def convert_extent_to_target_crs(self, left, bottom, right, top, source_crs, target_crs):
+        """Convert extent coordinates from source CRS to target CRS"""
+        if source_crs == target_crs:
+            return left, bottom, right, top
+            
+        try:
+            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+            
+            # Convert all four corners
+            left_top = transformer.transform(left, top)
+            right_top = transformer.transform(right, top)
+            right_bottom = transformer.transform(right, bottom)
+            left_bottom = transformer.transform(left, bottom)
+            
+            # Find the min/max coordinates in the target CRS
+            x_coords = [left_top[0], right_top[0], right_bottom[0], left_bottom[0]]
+            y_coords = [left_top[1], right_top[1], right_bottom[1], left_bottom[1]]
+            
+            new_left = min(x_coords)
+            new_right = max(x_coords)
+            new_bottom = min(y_coords)
+            new_top = max(y_coords)
+            
+            return new_left, new_bottom, new_right, new_top
+            
+        except Exception as e:
+            print(f"Error converting CRS from {source_crs} to {target_crs}: {e}")
+            return left, bottom, right, top  # Return original if conversion fails
+
+    def crop_tiff_to_static_domain(self, tiff_file, band_idx=1):
+        """Crop TIFF data to match the static domain extent for a specific band"""
+        # Get TIFF extent and transform
+        tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_transform, tiff_crs = self.get_tiff_extent(tiff_file)
+        
+        # Convert TIFF extent to static CRS if needed
+        if tiff_crs != self.static_crs:
+            tiff_left, tiff_bottom, tiff_right, tiff_top = self.convert_extent_to_target_crs(
+                tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_crs, self.static_crs
+            )
+        
+        # Check if there's any overlap
+        if (tiff_right < self.static_xmin or tiff_left > self.static_xmax or
+            tiff_top < self.static_ymin or tiff_bottom > self.static_ymax):
+            print(f"Warning: No overlap between TIFF {tiff_file} and static domain")
+            return np.zeros((self.ny, self.nx))
+        
+        # Calculate the overlapping region
+        overlap_left = max(tiff_left, self.static_xmin)
+        overlap_right = min(tiff_right, self.static_xmax)
+        overlap_bottom = max(tiff_bottom, self.static_ymin)
+        overlap_top = min(tiff_top, self.static_ymax)
+        
+        # Calculate pixel size (assuming regular grid)
+        pixel_width = tiff_transform[0]
+        pixel_height = abs(tiff_transform[4])
+        
+        # Calculate row and column offsets for cropping
+        col_start = int((overlap_left - tiff_left) / pixel_width)
+        row_start = int((tiff_top - overlap_top) / pixel_height)
+        
+        # Calculate number of columns and rows to read
+        cols_to_read = int((overlap_right - overlap_left) / pixel_width)
+        rows_to_read = int((overlap_top - overlap_bottom) / pixel_height)
+        
+        # Ensure we don't exceed TIFF boundaries
+        col_start = max(0, col_start)
+        row_start = max(0, row_start)
+        
+        with rasterio.open(tiff_file) as src:
+            # Read only the portion that overlaps with the static domain for the specified band
+            window = Window(col_start, row_start, cols_to_read, rows_to_read)
+            arr = src.read(band_idx, window=window)
+            
+            # Resize to match static domain dimensions if needed
+            if arr.shape != (self.ny, self.nx):
+                if arr.shape[0] > 0 and arr.shape[1] > 0:  # Ensure we have data to resize
+                    zoom_factors = (self.ny / arr.shape[0], self.nx / arr.shape[1])
+                    arr = zoom(arr, zoom_factors, order=1)  # linear interpolation
+                else:
+                    print(f"Warning: Empty array after cropping for {tiff_file}")
+                    arr = np.zeros((self.ny, self.nx))
+            
+            return arr
+
+    def get_band_names(self, tiff_file):
+        """Get all band names from a TIFF file"""
+        with rasterio.open(tiff_file) as src:
+            return src.descriptions
+
 
 class SalsaDriver:
     """Generate a SALSA driver NetCDF file for PALM using GeoTIFF emissions."""
@@ -319,83 +530,40 @@ class SalsaDriver:
         nc_aerosol_emission_values.coordinates = "time y x ncat"
 
         # --- Initialize arrays for each hour and category ---
-        # Create separate arrays for each emission category and each hour
         traffic_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         road_dust_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         wood_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         
-        # Define which species to process and how to map them to categories
-        species_mapping = {
-            "oc": {"target": "OC", "category": [0, 2]},  # OC goes to traffic (0) and wood (2)
-            "bc": {"target": "BC", "category": [0, 2]},  # BC goes to traffic (0) and wood (2)
-            "na": {"target": "SS", "category": []},      # SS not assigned to any category
-            "nh3": {"target": "NH3", "category": [0]},   # NH3 goes to traffic (0)
-            "pb": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
-            "cd": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
-            "hg": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
-            "as": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
-            "ni": {"target": "DU", "category": [1]},     # DU goes to road dust (1)
-            "othmin": {"target": "DU", "category": [1]}  # DU goes to road dust (1)
-        }
+        # Get all TIFF files to process
+        tiff_files = list(glob.glob(os.path.join(self.tiff_dir, "emission_*_temporal.tif")))
+        print(f"Found {len(tiff_files)} TIFF files to process")
         
-        # Process each TIFF file
+        # Create processor instance with only picklable data
+        processor = TiffProcessor(
+            self.static_params, 
+            self.static_crs, 
+            self.active_categories, 
+            self.nx, 
+            self.ny, 
+            self.ntime
+        )
+        
+        # Use multiprocessing to process files in parallel
+        num_processes = min(cpu_count(), len(tiff_files))
+        print(f"Using {num_processes} processes for parallel processing")
+        
+        # Process files in parallel
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(processor.process_single_file, tiff_files)
+        
+        # Aggregate results from all processes
         processed_files = 0
-        for tiff_file in glob.glob(os.path.join(self.tiff_dir, "emission_*_temporal.tif")):
-            species = os.path.basename(tiff_file).split("_")[1].lower()
-            
-            # Skip species that are not in our mapping
-            if species not in species_mapping:
-                print(f"Skipping {species}, not mapped to any aerosol species.")
-                continue
-                
-            print(f"Processing {species} from {tiff_file}")
-            processed_files += 1
-            
-            # Get all band names from the TIFF file
-            band_names = self.get_band_names(tiff_file)
-            if not band_names or all(name is None for name in band_names):
-                print(f"Warning: No band names found in {tiff_file}, skipping")
-                continue
-            
-            # Process each band that matches active categories and has valid hour info
-            target_species = species_mapping[species]["target"]
-            target_categories = species_mapping[species]["category"]
-            
-            if not target_categories:
-                print(f"Warning: Species {species} not assigned to any emission category, skipping")
-                continue
-                
-            for band_idx, band_name in enumerate(band_names, 1):
-                if not band_name:
-                    continue
-                    
-                # Check if band matches active categories
-                if not pattern_match(band_name, self.active_categories):
-                    continue
-                
-                # Extract hour from band name
-                hour = extract_hour_from_band_name(band_name)
-                if hour is None or hour >= self.ntime:
-                    print(f"Warning: Could not extract valid hour from band '{band_name}', skipping")
-                    continue
-                
-                print(f"  Processing hour {hour} from band {band_idx}: {band_name}")
-                
-                # Crop the TIFF to match the static domain for this band
-                arr = self.crop_tiff_to_static_domain(tiff_file, band_idx)
-                converted_arr = mass_to_number(arr, target_species)
-                
-                # Fix orientation
-                converted_arr = np.flipud(converted_arr)
-                
-                # Add to the appropriate emission categories
-                for category in target_categories:
-                    if category == 0:  # Traffic exhaust
-                        traffic_by_hour[hour, :, :] += converted_arr
-                    elif category == 1:  # Road dust
-                        road_dust_by_hour[hour, :, :] += converted_arr
-                    elif category == 2:  # Wood combustion
-                        wood_by_hour[hour, :, :] += converted_arr
+        for result in results:
+            if result is not None:
+                traffic_by_hour += result['traffic']
+                road_dust_by_hour += result['road_dust']
+                wood_by_hour += result['wood']
+                processed_files += 1
 
         print(f"Processed {processed_files} TIFF files with emission data")
         
@@ -405,9 +573,9 @@ class SalsaDriver:
         total_wood = np.sum(wood_by_hour)
         
         print(f"Total emissions by category:")
-        print(f"  Traffic exhaust: {total_traffic:.2e} #/m²/s")
-        print(f"  Road dust: {total_road_dust:.2e} #/m²/s")
-        print(f"  Wood combustion: {total_wood:.2e} #/m²/s")
+        print(f"  Traffic exhaust: {total_traffic:.10e} #/m²/s")
+        print(f"  Road dust: {total_road_dust:.10e} #/m²/s")
+        print(f"  Wood combustion: {total_wood:.10e} #/m²/s")
         
         if total_traffic == 0 and total_road_dust == 0 and total_wood == 0:
             print("WARNING: All emission values are zero! Check your input data and active categories.")
@@ -422,111 +590,6 @@ class SalsaDriver:
 
         nc_aerosol_emission_values[:] = aerosol_emission_values
 
-    def get_tiff_extent(self, tiff_file):
-        """Get the spatial extent of a TIFF file and its CRS"""
-        with rasterio.open(tiff_file) as src:
-            transform = src.transform
-            width = src.width
-            height = src.height
-            tiff_crs = src.crs.to_string() if src.crs else config_proj
-            
-            # Calculate corner coordinates in the TIFF's native CRS
-            left = transform[2]
-            top = transform[5]
-            right = left + transform[0] * width
-            bottom = top + transform[4] * height
-            
-            return left, bottom, right, top, transform, tiff_crs
-
-    def convert_extent_to_target_crs(self, left, bottom, right, top, source_crs, target_crs):
-        """Convert extent coordinates from source CRS to target CRS"""
-        if source_crs == target_crs:
-            return left, bottom, right, top
-            
-        try:
-            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
-            
-            # Convert all four corners
-            left_top = transformer.transform(left, top)
-            right_top = transformer.transform(right, top)
-            right_bottom = transformer.transform(right, bottom)
-            left_bottom = transformer.transform(left, bottom)
-            
-            # Find the min/max coordinates in the target CRS
-            x_coords = [left_top[0], right_top[0], right_bottom[0], left_bottom[0]]
-            y_coords = [left_top[1], right_top[1], right_bottom[1], left_bottom[1]]
-            
-            new_left = min(x_coords)
-            new_right = max(x_coords)
-            new_bottom = min(y_coords)
-            new_top = max(y_coords)
-            
-            return new_left, new_bottom, new_right, new_top
-            
-        except Exception as e:
-            print(f"Error converting CRS from {source_crs} to {target_crs}: {e}")
-            return left, bottom, right, top  # Return original if conversion fails
-
-    def crop_tiff_to_static_domain(self, tiff_file, band_idx=1):
-        """Crop TIFF data to match the static domain extremet for a specific band"""
-        # Get TIFF extent and transform
-        tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_transform, tiff_crs = self.get_tiff_extent(tiff_file)
-        
-        # Convert TIFF extent to static CRS if needed
-        if tiff_crs != self.static_crs:
-            tiff_left, tiff_bottom, tiff_right, tiff_top = self.convert_extent_to_target_crs(
-                tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_crs, self.static_crs
-            )
-        
-        # Check if there's any overlap
-        if (tiff_right < self.static_xmin or tiff_left > self.static_xmax or
-            tiff_top < self.static_ymin or tiff_bottom > self.static_ymax):
-            print(f"Warning: No overlap between TIFF {tiff_file} and static domain")
-            return np.zeros((self.ny, self.nx))
-        
-        # Calculate the overlapping region
-        overlap_left = max(tiff_left, self.static_xmin)
-        overlap_right = min(tiff_right, self.static_xmax)
-        overlap_bottom = max(tiff_bottom, self.static_ymin)
-        overlap_top = min(tiff_top, self.static_ymax)
-        
-        # Calculate pixel size (assuming regular grid)
-        pixel_width = tiff_transform[0]
-        pixel_height = abs(tiff_transform[4])
-        
-        # Calculate row and column offsets for cropping
-        col_start = int((overlap_left - tiff_left) / pixel_width)
-        row_start = int((tiff_top - overlap_top) / pixel_height)
-        
-        # Calculate number of columns and rows to read
-        cols_to_read = int((overlap_right - overlap_left) / pixel_width)
-        rows_to_read = int((overlap_top - overlap_bottom) / pixel_height)
-        
-        # Ensure we don't exceed TIFF boundaries
-        col_start = max(0, col_start)
-        row_start = max(0, row_start)
-        
-        with rasterio.open(tiff_file) as src:
-            # Read only the portion that overlaps with the static domain for the specified band
-            window = Window(col_start, row_start, cols_to_read, rows_to_read)
-            arr = src.read(band_idx, window=window)
-            
-            # Resize to match static domain dimensions if needed
-            if arr.shape != (self.ny, self.nx):
-                if arr.shape[0] > 0 and arr.shape[1] > 0:  # Ensure we have data to resize
-                    zoom_factors = (self.ny / arr.shape[0], self.nx / arr.shape[1])
-                    arr = zoom(arr, zoom_factors, order=1)  # linear interpolation
-                else:
-                    print(f"Warning: Empty array after cropping for {tiff_file}")
-                    arr = np.zeros((self.ny, self.nx))
-            
-            return arr
-
-    def get_band_names(self, tiff_file):
-        """Get all band names from a TIFF file"""
-        with rasterio.open(tiff_file) as src:
-            return src.descriptions
-
     def finalize(self):
         print("Closing files...")
         self.static_nc.close()
@@ -534,27 +597,27 @@ class SalsaDriver:
 
 
 if __name__ == "__main__":
-    static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augsburg_10/OUTPUT/Augsburg_3_static"
-    tiff_dir = "/home/vaithisa/Downscale_Emissions/Downscale_Winter_10m"
+    static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augsburg_350/OUTPUT/Augsburg_350_allsector_static"
+    tiff_dir = "/mnt/t/PhD_data/Downscale_Augsburg_center_10m/"
     
-    # Define which categories to process
+    # Define which categories to process (using wildcard patterns)
     active_categories = [
         'A_PublicPower', 
         'B_Industry', 
         'C_OtherStationaryComb', 
-        #'D_Fugitives',
-        #'E_Solvents', 
+        'D_Fugitives',
+        'E_Solvents', 
         'F_RoadTransport', 
-        #'G_Shipping', 
-        #'H_Aviation',
-        #'I_OffRoad', 
-        #'J_Waste', 
-        #'K_AgriLivestock', 
-        #'L_AgriOther',
+        'G_Shipping', 
+        'H_Aviation',
+        'I_OffRoad', 
+        'J_Waste', 
+        'K_AgriLivestock', 
+        'L_AgriOther',
         #'SumAllSectors'
     ]
     
-    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_32_salsa", active_categories)
+    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_350_allsector_salsa", active_categories)
     driver.write_global_attributes()
     driver.define_dimensions()
     driver.add_variables()
