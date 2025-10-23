@@ -1,4 +1,3 @@
-###parallel processing version
 import os
 import glob
 import math
@@ -32,6 +31,41 @@ default_proj = "EPSG:4326"  # WGS84
 # Coordinate transformers
 transformer_to_utm = Transformer.from_crs(default_proj, config_proj, always_xy=True)
 transformer_to_wgs = Transformer.from_crs(config_proj, default_proj, always_xy=True)
+
+def calculate_palm_bin_diameters(reglim, nbin):
+    """
+    Calculate bin diameters exactly as PALM does based on reglim and nbin parameters
+    
+    Parameters:
+    reglim: [dmin1, dmin2, dmax2] - size range limits in meters
+    nbin: [nbin1, nbin2] - number of bins in each subrange
+    
+    Returns:
+    dmid: array of bin mid diameters in meters
+    """
+    dmin1, dmin2, dmax2 = reglim
+    nbin1, nbin2 = nbin
+    
+    nbins_total = nbin1 + nbin2
+    dmid = np.zeros(nbins_total)
+    api6 = np.pi / 6.0
+    
+    # Subrange 1: logarithmic spacing
+    ratio_d1 = dmin2 / dmin1
+    for i in range(nbin1):
+        vlolim = api6 * (dmin1 * ratio_d1**(i / nbin1))**3
+        vhilim = api6 * (dmin1 * ratio_d1**((i+1) / nbin1))**3
+        dmid[i] = np.sqrt((vhilim/api6)**(1/3) * (vlolim/api6)**(1/3))
+    
+    # Subrange 2: logarithmic spacing  
+    ratio_d2 = dmax2 / dmin2
+    for i in range(nbin2):
+        idx = nbin1 + i
+        vlolim = api6 * (dmin2 * ratio_d2**(i / nbin2))**3
+        vhilim = api6 * (dmin2 * ratio_d2**((i+1) / nbin2))**3
+        dmid[idx] = np.sqrt((vhilim/api6)**(1/3) * (vlolim/api6)**(1/3))
+    
+    return dmid
 
 def mass_to_number(mass_flux, species):
     """
@@ -164,6 +198,7 @@ class TiffProcessor:
         species_mapping = {
             "oc": {"target": "OC", "category": [0, 2]},
             "bc": {"target": "BC", "category": [0, 2]},
+            "ec": {"target": "BC", "category": [0, 2]},
             "na": {"target": "SS", "category": []},
             "nh3": {"target": "NH3", "category": [0]},
             "pb": {"target": "DU", "category": [1]},
@@ -171,7 +206,12 @@ class TiffProcessor:
             "hg": {"target": "DU", "category": [1]},
             "as": {"target": "DU", "category": [1]},
             "ni": {"target": "DU", "category": [1]},
-            "othmin": {"target": "DU", "category": [1]}
+            "othmin": {"target": "DU", "category": [1]},
+            "so2": {"target": "H2SO4", "category": [0, 2]},    # Traffic & wood combustion
+            "so4": {"target": "H2SO4", "category": [0, 2]},    # Direct sulfate emissions
+            "nox": {"target": "HNO3", "category": [0, 1, 2]},  # Traffic, road dust, wood
+            "no": {"target": "HNO3", "category": [0, 1, 2]},   # Direct NO emissions
+            "no2": {"target": "HNO3", "category": [0, 1, 2]},  # Direct NO₂ emissions
         }
         
         # Skip species that are not in our mapping
@@ -393,6 +433,7 @@ class SalsaDriver:
         self.nc_file.description = "Aerosol input (SALSA driver) for PALM to simulate the aerosol particle concentrations, size distributions and chemical compositions."
         self.nc_file.title = "PALM input file for SALSA aerosol module"
         self.nc_file.institution = "Chair of Model-based Environmental Exposure Science, University of Augsburg"
+        self.nc_file.lod = 2
         self.nc_file.author = "Sathish Kumar Vaithiyanadhan"
         self.nc_file.palm_version = "6.0"
         self.nc_file.active_categories = ', '.join(self.active_categories)
@@ -412,7 +453,7 @@ class SalsaDriver:
         self.nc_file.createDimension("ncat", self.nncat)
         self.nc_file.createDimension("composition_index", self.ncomposition_index)
         self.nc_file.createDimension("max_string_length", self.nmax_string_length)
-        self.nc_file.createDimension("Dmid", 8)
+        self.nc_file.createDimension("Dmid", 8)  # 1 + 7 = 8 bins total
 
         # === Coordinates ===
         x = self.nc_file.createVariable("x", "f4", ("x",))
@@ -430,9 +471,20 @@ class SalsaDriver:
         t.units = "s"
         t.long_name = "time in seconds"
 
+        # === Calculate bin diameters exactly as PALM does ===
         Dmid = self.nc_file.createVariable("Dmid", "f4", ("Dmid",))
-        Dmid[:] = np.linspace(0.01e-6, 2.5e-6, 8)  # dummy bins
+        
+        # Use the same parameters as in your PALM namelist
+        reglim = [3.0e-9, 1.0e-8, 2.5e-6]  # from your namelist
+        nbin = [1, 7]                      # from your namelist
+        
+        palm_dmid = calculate_palm_bin_diameters(reglim, nbin)
+        Dmid[:] = palm_dmid
         Dmid.units = "m"
+        
+        print(f"Generated {len(palm_dmid)} bin diameters:")
+        for i, d in enumerate(palm_dmid):
+            print(f"  Bin {i+1}: {d:.2e} m")
 
         # === Dimension coordinate variables ===
         # Create coordinate variables for categorical dimensions
@@ -488,11 +540,11 @@ class SalsaDriver:
         # Define default mass fractions (these should be customized based on your data)
         emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index))
         # Traffic exhaust: mostly OC, BC, some NH3
-        emission_mass_fracs[0, :] = [0.0, 0.5, 0.3, 0.0, 0.0, 0.0, 0.2]  # H2SO4, OC, BC, DU, SS, HNO3, NH3
+        emission_mass_fracs[0, :] = [0.1, 0.4, 0.2, 0.0, 0.0, 0.1, 0.2]  # H2SO4, OC, BC, DU, SS, HNO3, NH3
         # Road dust: mostly DU
-        emission_mass_fracs[1, :] = [0.0, 0.1, 0.0, 0.9, 0.0, 0.0, 0.0]
+        emission_mass_fracs[1, :] = [0.0, 0.1, 0.0, 0.8, 0.0, 0.1, 0.0]
         # Wood combustion: mostly OC, BC
-        emission_mass_fracs[2, :] = [0.0, 0.7, 0.3, 0.0, 0.0, 0.0, 0.0]
+        emission_mass_fracs[2, :] = [0.1, 0.6, 0.3, 0.0, 0.0, 0.0, 0.0]
         
         nc_emission_mass_fracs = self.nc_file.createVariable(
             "emission_mass_fracs", "f4", ("ncat", "composition_index"), fill_value=-9999.0
@@ -526,7 +578,10 @@ class SalsaDriver:
         nc_aerosol_emission_values.units = "#/m2/s"
         nc_aerosol_emission_values.long_name = "aerosol emission values"
         nc_aerosol_emission_values.source = "Based on Kumar et al., 2009: Comparative study of measured and modelled number concentrations of nanoparticles in an urban street canyon"
-        nc_aerosol_emission_values.lod = 2
+        
+        # FIX: Add lod as an integer attribute (not as a variable)
+        nc_aerosol_emission_values.lod = 2  # This is the critical fix
+        
         nc_aerosol_emission_values.coordinates = "time y x ncat"
 
         # --- Initialize arrays for each hour and category ---
@@ -534,9 +589,29 @@ class SalsaDriver:
         road_dust_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         wood_by_hour = np.zeros((self.ntime, self.ny, self.nx))
         
-        # Get all TIFF files to process
-        tiff_files = list(glob.glob(os.path.join(self.tiff_dir, "emission_*_temporal.tif")))
-        print(f"Found {len(tiff_files)} TIFF files to process")
+        # Get all TIFF files to process - FIXED: Use multiple file patterns
+        tiff_patterns = [
+            os.path.join(self.tiff_dir, "emission_*_temporal.tif"),
+            #os.path.join(self.tiff_dir, "emission_*.tif"),  # Fallback pattern
+        ]
+        
+        tiff_files = []
+        for pattern in tiff_patterns:
+            files = glob.glob(pattern)
+            if files:
+                tiff_files.extend(files)
+                print(f"Found {len(files)} files with pattern: {pattern}")
+        
+        # Remove duplicates
+        tiff_files = list(set(tiff_files))
+        print(f"Total unique TIFF files to process: {len(tiff_files)}")
+        
+        if len(tiff_files) == 0:
+            print("WARNING: No TIFF files found! Creating empty emission data.")
+            # Create empty emission data
+            aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat))
+            nc_aerosol_emission_values[:] = aerosol_emission_values
+            return
         
         # Create processor instance with only picklable data
         processor = TiffProcessor(
@@ -548,8 +623,8 @@ class SalsaDriver:
             self.ntime
         )
         
-        # Use multiprocessing to process files in parallel
-        num_processes = min(cpu_count(), len(tiff_files))
+        # Use multiprocessing to process files in parallel - FIXED: Ensure at least 1 process
+        num_processes = max(1, min(cpu_count(), len(tiff_files)))
         print(f"Using {num_processes} processes for parallel processing")
         
         # Process files in parallel
@@ -597,7 +672,7 @@ class SalsaDriver:
 
 
 if __name__ == "__main__":
-    static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augsburg_350/OUTPUT/Augsburg_350_allsector_static"
+    static_file = "/home/vaithisa/palm_model_system-v25.04/palm_model_system-v25.04/JOBS/Augsburg_small_allsector/INPUT/Augsburg_small_allsector_static"
     tiff_dir = "/mnt/t/PhD_data/Downscale_Augsburg_center_10m/"
     
     # Define which categories to process (using wildcard patterns)
@@ -617,7 +692,7 @@ if __name__ == "__main__":
         #'SumAllSectors'
     ]
     
-    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_350_allsector_salsa", active_categories)
+    driver = SalsaDriver(static_file, tiff_dir, "/home/vaithisa/Palm_SALSA/Augsburg_small_allsector_salsa", active_categories)
     driver.write_global_attributes()
     driver.define_dimensions()
     driver.add_variables()
