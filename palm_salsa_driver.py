@@ -15,13 +15,13 @@ import pickle
 
 # === Species properties for mass → number conversion ===
 species_properties = {
-    "OC":   {"rho": 1500, "d": 0.1e-6},   # 0.1 µm
-    "BC":   {"rho": 1800, "d": 0.05e-6},  # 0.05 µm
-    "DU":   {"rho": 2650, "d": 1.0e-6},   # 1 µm
-    "SS":   {"rho": 2200, "d": 0.5e-6},   # 0.5 µm
-    "NH3":  {"rho": 1700, "d": 0.05e-6},  # 0.05 µm
-    "H2SO4":{"rho": 1840, "d": 0.02e-6},  # 20 nm (unused here, set to 0)
-    "HNO3": {"rho": 1500, "d": 0.05e-6},  # (unused here, set to 0)
+    "OC":   {"rho": 1500, "d": 0.1e-6},   # 0.1 um
+    "BC":   {"rho": 1800, "d": 0.05e-6},  # 0.05 um
+    "DU":   {"rho": 2650, "d": 1.0e-6},   # 1 um
+    "SS":   {"rho": 2200, "d": 0.5e-6},   # 0.5 um
+    "NH3":  {"rho": 1700, "d": 0.05e-6},  # 0.05 um
+    "H2SO4":{"rho": 1840, "d": 1.826e-8},  # 20 nm 
+    "HNO3": {"rho": 1500, "d": 0.05e-6},  # 0.05 um
 }
 
 # Projection configurations
@@ -196,7 +196,7 @@ class TiffProcessor:
         
         # Species mapping
         species_mapping = {
-            "oc": {"target": "OC", "category": [0, 2]},
+            "oc": {"target": "OC", "category": [0, 2]}, # 0 - Traffic, 1 - road dust, 2 - wood
             "bc": {"target": "BC", "category": [0, 2]},
             "ec": {"target": "BC", "category": [0, 2]},
             "na": {"target": "SS", "category": []},
@@ -207,11 +207,11 @@ class TiffProcessor:
             "as": {"target": "DU", "category": [1]},
             "ni": {"target": "DU", "category": [1]},
             "othmin": {"target": "DU", "category": [1]},
-            "so2": {"target": "H2SO4", "category": [0, 2]},    # Traffic & wood combustion
-            "so4": {"target": "H2SO4", "category": [0, 2]},    # Direct sulfate emissions
-            "nox": {"target": "HNO3", "category": [0, 1, 2]},  # Traffic, road dust, wood
-            "no": {"target": "HNO3", "category": [0, 1, 2]},   # Direct NO emissions
-            "no2": {"target": "HNO3", "category": [0, 1, 2]},  # Direct NO₂ emissions
+            "so2": {"target": "H2SO4", "category": [0, 2]},    
+            "so4": {"target": "H2SO4", "category": [0, 2]},    
+            "nox": {"target": "HNO3", "category": [0, 1, 2]},  
+            "no": {"target": "HNO3", "category": [0, 1, 2]},   
+            "no2": {"target": "HNO3", "category": [0, 1, 2]},  
         }
         
         # Skip species that are not in our mapping
@@ -673,7 +673,7 @@ class SalsaDriver:
 
 if __name__ == "__main__":
     static_file = "/home/vaithisa/palm_model_system-v25.04/palm_model_system-v25.04/JOBS/Augsburg_small_allsector/INPUT/Augsburg_small_allsector_static"
-    tiff_dir = "/mnt/t/PhD_data/Downscale_Augsburg_center_10m/"
+    tiff_dir = "/mnt/t/PhD_data/Downscale_Augsburg_center_10m_03022022/"
     
     # Define which categories to process (using wildcard patterns)
     active_categories = [
