@@ -6,6 +6,15 @@ LOD 2: Gridded preprocessed hourly (other temporal intervals will be possible in
 
 ---
 
+# Key scientific references:
+- Kurppa et al. (2019) GMD - Main reference for PALM-SALSA implementation
+- Kokkola et al. (2008) ACP - Original SALSA description
+- Kumar et al. (2009) AE - Traffic emission factors and size distributions
+- Zhang et al. (2001) AE - Dry deposition and size distributions
+- Dallmann et al. (2014) ACP - Chemical composition of traffic emissions
+
+---
+
 # Attributes and Dimensions
 
 To setup the attributes and the dimensions for the salsa driver, based on the latest [SALSA Aerosol module](https://palm.muk.uni-hannover.de/trac/wiki/doc/tec/aerosol) documentation. This salsa aerosol driver follows the PIDS for the PALM version 25.04. 
@@ -14,7 +23,7 @@ To setup the attributes and the dimensions for the salsa driver, based on the la
 
 - **x**: Spatial dimension in the x-direction (meters, from static driver).
 - **y**: Spatial dimension in the y-direction (meters, from static driver).
-- **time**: Temporal dimension (24 hours, in seconds).
+- **time**: Temporal dimension (depends on your palm simulation timeframe, in seconds).
 - **ncat**: Number of emission categories (3: traffic exhaust, road dust, wood combustion).
 - **composition_index**: Number of aerosol chemical components (7: H2SO4, OC, BC, DU, SS, HNO3, NH3).
 - **max_string_length**: Length of string arrays for category and composition names (25 characters).
@@ -45,6 +54,7 @@ The SALSA aerosol driver integrates gridded emission data from the GRETA invento
 - **Multiple Sector Handling**: Processes emission data from multiple sectors (e.g., F_RoadTransport, C_OtherStationaryComb) in the GRETA inventory.
 - **Multiple Species Handling**: Maps GRETA species (e.g., oc, bc, nh3, pb) to SALSA aerosol components (e.g., H₂SO₄, OC, BC, DU (dust & metals), SS (sea salt / Na), HNO₃, NH₃ ).
 - **Source-Category Handling**: Supports three emission categories (traffic exhaust, road dust, wood combustion) with weighted contributions for overlapping species (e.g., OC and BC split between traffic and wood combustion).
+- **Proper Size bins** based on the scientific key references.
 - **Hourly Emissions**: Processes 24 hourly bands from GeoTIFF files, ensuring temporal alignment with PALM’s LOD2 requirements.
 - **Automatic Time-Step Synchronization**: Aligns emission data across species using hourly GeoTIFF bands.
 - **NaN Handling**: Uses a fill value of -9999.0 for missing data in numerical arrays.
