@@ -320,22 +320,28 @@ def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
 def extract_hour_from_band_name(band_name):
     """
     Extract hour information from band name.
-    Expected format: F_RoadTransport_h01_YYYYMMDD or similar
+    Expected format: F_RoadTransport_h00_YYYYMMDD -> 0
+                     F_RoadTransport_h23_YYYYMMDD -> 23
     
     Returns:
     --------
-    hour : int
-        Hour as integer (0-23) or None if not found
+    hour : int (0-23) or None if not found
     """
     if not band_name:
         return None
     
-    # Try to find hour pattern: h01, h02, ..., h24
+    # Matches 'h' followed by 1 or 2 digits
     hour_match = re.search(r'h(\d{1,2})', band_name)
+    
     if hour_match:
         hour = int(hour_match.group(1))
-        # Convert 1-24 to 0-23 format
-        return hour - 1 if 1 <= hour <= 24 else 0
+        
+        # Ensure the hour is within the valid meteorological range (0-23)
+        if 0 <= hour <= 23:
+            return hour
+        else:
+            # Handle edge case if h24 appears, mapping it back to 0 or handling as error
+            return 0 if hour == 24 else None
     
     return None
 
