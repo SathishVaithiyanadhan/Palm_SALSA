@@ -48,8 +48,7 @@ REGLIM = [3.0e-9, 1.0e-8, 2.5e-6]  # [dmin1, dmin2, dmax2] in meters
 NBIN = [1, 7]                       # [nbin1, nbin2] - 8 total bins
 NBINS_TOTAL = NBIN[0] + NBIN[1]      # 8 bins
 
-# Log-normal size distribution parameters for different emission categories
-# Based on Kumar et al. (2009), Zhang et al. (2001), and literature
+
 SIZE_DISTRIBUTIONS = {
     0: {  # Traffic exhaust (nucleation + accumulation mode)
         "name": "Traffic exhaust",
@@ -57,26 +56,22 @@ SIZE_DISTRIBUTIONS = {
             {"Dg": 20e-9, "sigma": 1.5, "weight": 0.4},   # Nucleation mode
             {"Dg": 60e-9, "sigma": 1.8, "weight": 0.6},   # Accumulation mode
         ],
-        "reference": "Kumar et al. (2009)"
     },
     1: {  # Road dust (coarse mode)
         "name": "Road dust",
         "modes": [
             {"Dg": 2.5e-6, "sigma": 2.0, "weight": 1.0},  # Coarse mode
         ],
-        "reference": "Zhang et al. (2001)"
     },
     2: {  # Wood combustion (accumulation mode)
         "name": "Wood combustion",
         "modes": [
             {"Dg": 80e-9, "sigma": 1.6, "weight": 1.0},   # Accumulation mode
         ],
-        "reference": "Hays et al. (2002)"
     }
 }
 
 # Chemical composition for each emission category (mass fractions)
-# Based on Kurppa et al. (2019), Dallmann et al. (2014), and literature
 CATEGORY_COMPOSITION = {
     0: {  # Traffic exhaust
         "H2SO4": 0.04,   # 4% - sulfuric acid
@@ -86,7 +81,6 @@ CATEGORY_COMPOSITION = {
         "SS":    0.00,   # 0% - sea salt
         "HNO3":  0.00,   # 0% - nitric acid (gas phase, condenses later)
         "NH3":   0.00,   # 0% - ammonia (gas phase, condenses later)
-        "reference": "Dallmann et al. (2014), Kurppa et al. (2019)"
     },
     1: {  # Road dust (mineral dust)
         "H2SO4": 0.01,   # 1% - sulfuric acid
@@ -96,7 +90,6 @@ CATEGORY_COMPOSITION = {
         "SS":    0.02,   # 2% - sea salt (road salt in winter)
         "HNO3":  0.00,   # 0% - nitric acid
         "NH3":   0.00,   # 0% - ammonia
-        "reference": "US EPA AP-42, Zhang et al. (2001)"
     },
     2: {  # Wood combustion
         "H2SO4": 0.02,   # 2% - sulfuric acid
@@ -106,11 +99,10 @@ CATEGORY_COMPOSITION = {
         "SS":    0.00,   # 0% - sea salt
         "HNO3":  0.00,   # 0% - nitric acid
         "NH3":   0.00,   # 0% - ammonia
-        "reference": "McDonald et al. (2000), Fine et al. (2001)"
     }
 }
 
-# Species to category mapping - using ONLY speciated species (NO double counting)
+# Species to category mapping - using ONLY speciated species
 SPECIES_CATEGORY_MAPPING = {
     # Traffic-related species
     "oc":      {"target": "OC",    "categories": [0, 2]},     # OC from traffic and wood
@@ -136,11 +128,11 @@ SPECIES_CATEGORY_MAPPING = {
     "pm2_5":    {"target": "DU",    "categories": [0, 1]},        # PM2.5 (treated as dust)
     
     # Sea salt (if applicable)
-    "na":      {"target": "SS",    "categories": []},         # Not used in inland
-    #"cl":      {"target": "SS",    "categories": []},         # Not used in inland
+    "na":      {"target": "SS",    "categories": []},         # Not used 
+    #"cl":      {"target": "SS",    "categories": []},         # Not used 
 }
 
-# Bulk species to SKIP (avoid double counting)
+# Bulk species to SKIP 
 BULK_SPECIES = [ 'pm25', 'pmcoarse', 'no', 'no2', 'nmvoc', 'voc', 'co', 'co2', 'ch4']  #'pm10', 'pm2_5',
 
 # Projection configurations
@@ -158,7 +150,7 @@ transformer_to_wgs = Transformer.from_crs(CONFIG_PROJ, DEFAULT_PROJ, always_xy=T
 
 def calculate_palm_bin_diameters(reglim, nbin):
     """
-    Calculate bin diameters exactly as PALM does (Kokkola et al., 2008)
+    Calculate bin diameters exactly as PALM does 
     
     Parameters:
     -----------
@@ -236,7 +228,7 @@ def get_size_distribution_fractions(category, bin_diameters):
     """
     Calculate number fractions in each size bin for a given emission category
     
-    Uses multi-modal log-normal distributions based on literature values.
+    Uses multi-modal log-normal distributions
     
     Parameters:
     -----------
@@ -308,7 +300,7 @@ def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
     # Mass of a single particle
     particle_mass = rho * volume
     
-    # Number of particles (avoid division by zero)
+    # Number of particles 
     with np.errstate(divide='ignore', invalid='ignore'):
         number_flux = np.where((particle_mass > 0) & (bin_mass_flux > 0), 
                                bin_mass_flux / particle_mass, 
@@ -320,12 +312,7 @@ def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
 def extract_hour_from_band_name(band_name):
     """
     Extract hour information from band name.
-    Expected format: F_RoadTransport_h00_YYYYMMDD -> 0
-                     F_RoadTransport_h23_YYYYMMDD -> 23
     
-    Returns:
-    --------
-    hour : int (0-23) or None if not found
     """
     if not band_name:
         return None
@@ -336,11 +323,11 @@ def extract_hour_from_band_name(band_name):
     if hour_match:
         hour = int(hour_match.group(1))
         
-        # Ensure the hour is within the valid meteorological range (0-23)
+       
         if 0 <= hour <= 23:
             return hour
         else:
-            # Handle edge case if h24 appears, mapping it back to 0 or handling as error
+            
             return 0 if hour == 24 else None
     
     return None
@@ -420,10 +407,6 @@ def extract_static_domain(static_nc):
     
     return params
 
-
-# =============================================================================
-# TIFF PROCESSOR CLASS (for parallel processing)
-# =============================================================================
 
 class TiffProcessor:
     """
@@ -516,8 +499,6 @@ class TiffProcessor:
     def crop_tiff_to_static_domain(self, tiff_file, band_idx=1):
         """
         Crop TIFF data to match the static domain extent for a specific band
-        
-        FIXED: The variable 'src' is now properly handled within the with block
         """
         # Get TIFF extent and transform
         (tiff_left, tiff_bottom, tiff_right, tiff_top, 
@@ -541,7 +522,7 @@ class TiffProcessor:
         overlap_bottom = max(tiff_bottom, self.static_ymin)
         overlap_top = min(tiff_top, self.static_ymax)
         
-        # Calculate pixel size (assuming regular grid)
+        # Calculate pixel size 
         pixel_width = tiff_transform[0]
         pixel_height = abs(tiff_transform[4])
         
@@ -553,15 +534,14 @@ class TiffProcessor:
         cols_to_read = int((overlap_right - overlap_left) / pixel_width)
         rows_to_read = int((overlap_top - overlap_bottom) / pixel_height)
         
-        # Ensure we don't exceed TIFF boundaries (using the dimensions we already have)
+        # Ensure we don't exceed TIFF boundaries 
         col_start = max(0, min(col_start, tiff_width - 1))
         row_start = max(0, min(row_start, tiff_height - 1))
         cols_to_read = max(1, min(cols_to_read, tiff_width - col_start))
         rows_to_read = max(1, min(rows_to_read, tiff_height - row_start))
         
-        # Now open the file and read the data
+
         with rasterio.open(tiff_file) as src:
-            # Read only the portion that overlaps with the static domain
             window = Window(col_start, row_start, cols_to_read, rows_to_read)
             arr = src.read(band_idx, window=window)
             
@@ -589,14 +569,6 @@ class TiffProcessor:
     def process_single_file(self, tiff_file):
         """
         Process a single TIFF file with proper aerosol physics
-        
-        This is the core method that implements the scientific approach:
-        1. Skip bulk species to avoid double counting
-        2. Read mass emissions for each species
-        3. Map species to target chemical component and emission categories
-        4. Distribute mass across size bins according to log-normal distributions
-        5. Convert mass to number concentration per bin
-        6. Aggregate by category
         """
         # Extract filename
         filename = os.path.basename(tiff_file).lower()
@@ -658,7 +630,7 @@ class TiffProcessor:
             # Extract hour from band name
             hour = extract_hour_from_band_name(band_name)
             if hour is None or hour >= self.ntime:
-                # Try to infer hour from band index if naming doesn't have hour
+               
                 hour = (band_idx - 1) % self.ntime
             
             # Read mass data for this band
@@ -669,7 +641,7 @@ class TiffProcessor:
                 continue
             
             bands_processed += 1
-            if bands_processed <= 3:  # Print only first few bands to avoid log spam
+            if bands_processed <= 3: 
                 print(f"  Processing hour {hour:2d} from band {band_idx}")
             
             # For each category this species belongs to
@@ -719,32 +691,18 @@ class TiffProcessor:
         return results
 
 
-# =============================================================================
 # MAIN SALSA DRIVER CLASS
-# =============================================================================
 
 class SalsaDriver:
     """
     Generate a SALSA driver NetCDF file for PALM using GeoTIFF emissions.
     
-    This class implements the methodology described in Kurppa et al. (2019)
-    for creating aerosol emission input files for PALM's SALSA module.
     """
     
     def __init__(self, static_file, tiff_dir, output_file, active_categories=None):
         """
         Initialize the SALSA driver generator
-        
-        Parameters:
-        -----------
-        static_file : str
-            Path to PALM static file
-        tiff_dir : str
-            Directory containing emission TIFF files
-        output_file : str
-            Path for output NetCDF file
-        active_categories : list, optional
-            List of active emission category patterns
+    
         """
         print("=" * 70)
         print("PALM-SALSA Driver Generator")
@@ -755,7 +713,7 @@ class SalsaDriver:
         self.output_file = output_file
         self.tiff_dir = tiff_dir
         
-        # Set active categories (default to all if not specified)
+        # Set active categories 
         self.active_categories = active_categories if active_categories else ['*']
         
         # Extract domain parameters
@@ -1106,8 +1064,6 @@ class SalsaDriver:
     def validate_emissions(self):
         """
         Validate emission values against literature expectations
-        
-        This performs scientific validation following Kurppa et al. (2019)
         """
         print("\n" + "=" * 70)
         print("VALIDATION OF EMISSION VALUES")
@@ -1138,24 +1094,18 @@ class SalsaDriver:
                 if mean_by_category[cat] > 0:
                     print(f"  Mean (non-zero cells): {mean_by_category[cat]:.2e} #/m²/s")
             
-            # Validate against literature values
-            print("\nValidation against literature:")
-            #print("-" * 50)
             
-            # Traffic emissions validation (Kumar et al., 2009)
+            # Traffic emissions validation
             traffic_emissions = emissions[:, :, :, 0]
             traffic_nonzero = traffic_emissions[traffic_emissions > 0]
             
             if len(traffic_nonzero) > 0:
                 avg_traffic_per_cell = np.mean(traffic_nonzero)
                 
-                # Kumar et al. (2009) reports EF = 1.33e14 #/km/vehicle
-                # For typical traffic flow of 1000 vehicles/hour on a 10 m wide road:
                 expected_range = [1e8, 1e9]  # #/m²/s
                 
                 print(f"\nTraffic emissions:")
                 print(f"  Modeled mean: {avg_traffic_per_cell:.2e} #/m²/s")
-                #print(f"  Expected range from Kumar et al. (2009): [{expected_range[0]:.2e}, {expected_range[1]:.2e}] #/m²/s")
                 
                 if expected_range[0] <= avg_traffic_per_cell <= expected_range[1]:
                     print("  Traffic emissions within expected range")
@@ -1180,9 +1130,6 @@ class SalsaDriver:
             print(f"  Min hour: {np.argmin(hourly_totals)} (total: {np.min(hourly_totals):.2e})")
             print(f"  Max hour: {np.argmax(hourly_totals)} (total: {np.max(hourly_totals):.2e})")
             
-            #print("\n" + "=" * 70)
-            #print("VALIDATION COMPLETE")
-            #print("=" * 70)
 
     def finalize(self):
         """Close NetCDF files"""
@@ -1190,7 +1137,6 @@ class SalsaDriver:
         self.static_nc.close()
         self.nc_file.close()
         print(f"Successfully created: {self.output_file}")
-        #print("=" * 70)
 
 
 # =============================================================================
@@ -1219,9 +1165,7 @@ if __name__ == "__main__":
         'L_AgriOther',
     ]
     
-    print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
-    print("=" * 70)
     print(f"Static file: {static_file}")
     print(f"TIFF directory: {tiff_dir}")
     print(f"Output file: {output_file}")
@@ -1234,7 +1178,4 @@ if __name__ == "__main__":
         output_file=output_file,
         active_categories=active_categories
     )
-    
-    print("\n" + "=" * 70)
     print("PROCESS COMPLETED SUCCESSFULLY")
-    print("=" * 70)
