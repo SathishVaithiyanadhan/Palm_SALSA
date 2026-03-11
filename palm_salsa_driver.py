@@ -28,9 +28,8 @@ from multiprocessing import Pool, cpu_count
 import warnings
 warnings.filterwarnings('ignore')
 
-# =============================================================================
 # CONSTANTS AND SCIENTIFIC PARAMETERS
-# =============================================================================
+
 
 # Species properties for mass → number conversion (from Kokkola et al., 2008)
 species_properties = {
@@ -43,7 +42,7 @@ species_properties = {
     "NH3":   {"rho": 1700, "name": "Ammonia", "molar_mass": 0.017},         # kg/mol
 }
 
-# PALM/SALSA configuration parameters (from your namelist)
+# PALM/SALSA configuration parameters
 REGLIM = [3.0e-9, 1.0e-8, 2.5e-6]  # [dmin1, dmin2, dmax2] in meters
 NBIN = [1, 7]                       # [nbin1, nbin2] - 8 total bins
 NBINS_TOTAL = NBIN[0] + NBIN[1]      # 8 bins
@@ -74,62 +73,62 @@ SIZE_DISTRIBUTIONS = {
 # Chemical composition for each emission category (mass fractions)
 CATEGORY_COMPOSITION = {
     0: {  # Traffic exhaust
-        "H2SO4": 0.04,   # 4% - sulfuric acid
-        "OC":    0.48,   # 48% - organic carbon
-        "BC":    0.48,   # 48% - black carbon
-        "DU":    0.00,   # 0% - mineral dust
-        "SS":    0.00,   # 0% - sea salt
-        "HNO3":  0.00,   # 0% - nitric acid (gas phase, condenses later)
-        "NH3":   0.00,   # 0% - ammonia (gas phase, condenses later)
+        "H2SO4": 0.04,   
+        "OC":    0.48,  
+        "BC":    0.48,   
+        "DU":    0.00,   
+        "SS":    0.00, 
+        "HNO3":  0.00,   
+        "NH3":   0.00,   
     },
-    1: {  # Road dust (mineral dust)
-        "H2SO4": 0.01,   # 1% - sulfuric acid
-        "OC":    0.05,   # 5% - organic carbon (from road debris)
-        "BC":    0.02,   # 2% - black carbon (from tire wear)
-        "DU":    0.90,   # 90% - mineral dust
-        "SS":    0.02,   # 2% - sea salt (road salt in winter)
-        "HNO3":  0.00,   # 0% - nitric acid
-        "NH3":   0.00,   # 0% - ammonia
+    1: {  # Road dust 
+        "H2SO4": 0.01,   
+        "OC":    0.05,   
+        "BC":    0.02,   
+        "DU":    0.90,   
+        "SS":    0.02,   
+        "HNO3":  0.00,   
+        "NH3":   0.00,   
     },
     2: {  # Wood combustion
-        "H2SO4": 0.02,   # 2% - sulfuric acid
-        "OC":    0.70,   # 70% - organic carbon
-        "BC":    0.28,   # 28% - black carbon
-        "DU":    0.00,   # 0% - mineral dust
-        "SS":    0.00,   # 0% - sea salt
-        "HNO3":  0.00,   # 0% - nitric acid
-        "NH3":   0.00,   # 0% - ammonia
+        "H2SO4": 0.02,   
+        "OC":    0.70,   
+        "BC":    0.28,   
+        "DU":    0.00,   
+        "SS":    0.00,   
+        "HNO3":  0.00,   
+        "NH3":   0.00,  
     }
 }
 
 # Species to category mapping - using ONLY speciated species
 SPECIES_CATEGORY_MAPPING = {
     # Traffic-related species
-    "oc":      {"target": "OC",    "categories": [0, 2]},     # OC from traffic and wood
-    "bc":      {"target": "BC",    "categories": [0, 2]},     # BC from traffic and wood
-    "ec":      {"target": "BC",    "categories": [0, 2]},     # Elemental carbon = BC
-    "so2":     {"target": "H2SO4", "categories": [0, 2]},     # SO2 → H2SO4 (traffic, wood)
-    "nox":     {"target": "HNO3",  "categories": [0]},        # NOx → HNO3 (traffic only)
-    #"no":      {"target": "HNO3",  "categories": [0]},        # NO → HNO3
-    #"no2":     {"target": "HNO3",  "categories": [0]},        # NO2 → HNO3
-    "nh3":     {"target": "NH3",   "categories": [0, 2]},     # NH3 (traffic, wood)
+    "oc":      {"target": "OC",    "categories": [0, 2]},   
+    "bc":      {"target": "BC",    "categories": [0, 2]},    
+    "ec":      {"target": "BC",    "categories": [0, 2]},     
+    "so2":     {"target": "H2SO4", "categories": [0, 2]},      
+    "nox":     {"target": "HNO3",  "categories": [0]},       
+    #"no":      {"target": "HNO3",  "categories": [0]},       
+    #"no2":     {"target": "HNO3",  "categories": [0]},       
+    "nh3":     {"target": "NH3",   "categories": [0, 2]},     
     
     # Road dust related (heavy metals and minerals)
-    "pb":      {"target": "DU",    "categories": [1]},        # Lead in road dust
-    "cd":      {"target": "DU",    "categories": [1]},        # Cadmium
-    "as":      {"target": "DU",    "categories": [1]},        # Arsenic
-    "ni":      {"target": "DU",    "categories": [1]},        # Nickel
-    #"cu":      {"target": "DU",    "categories": [1]},        # Copper
-    #"zn":      {"target": "DU",    "categories": [1]},        # Zinc
-    #"cr":      {"target": "DU",    "categories": [1]},        # Chromium
-    "hg":      {"target": "DU",    "categories": [1]},        # Mercury
-    "othmin":  {"target": "DU",    "categories": [1]},        # Other minerals
-    "pm10":    {"target": "DU",    "categories": [0, 1]},        # PM10 (treated as dust)
-    "pm2_5":    {"target": "DU",    "categories": [0, 1]},        # PM2.5 (treated as dust)
+    "pb":      {"target": "DU",    "categories": [1]},        
+    "cd":      {"target": "DU",    "categories": [1]},      
+    "as":      {"target": "DU",    "categories": [1]},        
+    "ni":      {"target": "DU",    "categories": [1]},        
+    #"cu":      {"target": "DU",    "categories": [1]},        
+    #"zn":      {"target": "DU",    "categories": [1]},        
+    #"cr":      {"target": "DU",    "categories": [1]},        
+    "hg":      {"target": "DU",    "categories": [1]},        
+    "othmin":  {"target": "DU",    "categories": [1]},        
+    "pm10":    {"target": "DU",    "categories": [0, 1]},        
+    "pm2_5":    {"target": "DU",    "categories": [0, 1]},        
     
     # Sea salt (if applicable)
-    "na":      {"target": "SS",    "categories": []},         # Not used 
-    #"cl":      {"target": "SS",    "categories": []},         # Not used 
+    "na":      {"target": "SS",    "categories": []},        
+    #"cl":      {"target": "SS",    "categories": []},       
 }
 
 # Bulk species to SKIP 
@@ -144,9 +143,8 @@ transformer_to_utm = Transformer.from_crs(DEFAULT_PROJ, CONFIG_PROJ, always_xy=T
 transformer_to_wgs = Transformer.from_crs(CONFIG_PROJ, DEFAULT_PROJ, always_xy=True)
 
 
-# =============================================================================
 # UTILITY FUNCTIONS
-# =============================================================================
+
 
 def calculate_palm_bin_diameters(reglim, nbin):
     """
@@ -158,15 +156,6 @@ def calculate_palm_bin_diameters(reglim, nbin):
         [dmin1, dmin2, dmax2] - size range limits in meters
     nbin : list
         [nbin1, nbin2] - number of bins in each subrange
-    
-    Returns:
-    --------
-    dmid : array
-        Bin mid diameters in meters
-    dlow : array
-        Bin lower boundaries
-    dhigh : array
-        Bin upper boundaries
     """
     dmin1, dmin2, dmax2 = reglim
     nbin1, nbin2 = nbin
@@ -205,20 +194,7 @@ def calculate_palm_bin_diameters(reglim, nbin):
 def lognormal_pdf(d, dg, sigma_g):
     """
     Log-normal probability density function
-    
-    Parameters:
-    -----------
-    d : array
-        Diameters to evaluate PDF at [m]
-    dg : float
-        Geometric mean diameter [m]
-    sigma_g : float
-        Geometric standard deviation
-    
-    Returns:
-    --------
-    pdf : array
-        Probability density values
+
     """
     return (1.0 / (d * np.log(sigma_g) * np.sqrt(2 * np.pi))) * \
            np.exp(-(np.log(d / dg)**2) / (2 * np.log(sigma_g)**2))
@@ -229,16 +205,7 @@ def get_size_distribution_fractions(category, bin_diameters):
     Calculate number fractions in each size bin for a given emission category
     
     Uses multi-modal log-normal distributions
-    
-    Parameters:
-    -----------
-    category : int
-        Emission category (0=traffic, 1=road dust, 2=wood)
-    bin_diameters : array
-        Bin mid diameters in meters
-    
-    Returns:
-    --------
+
     fractions : array
         Number fractions for each bin (normalized to sum to 1)
     """
@@ -269,20 +236,6 @@ def get_size_distribution_fractions(category, bin_diameters):
 def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
     """
     Convert mass flux to number flux for a specific size bin
-    
-    Parameters:
-    -----------
-    mass_flux : float or array
-        Total mass flux [kg/m²/s] for this species
-    species : str
-        Chemical species name (must be in species_properties)
-    bin_diameter : float
-        Diameter of the size bin [m]
-    size_fraction : float
-        Fraction of total mass in this bin (from size distribution)
-    
-    Returns:
-    --------
     number_flux : float or array
         Number flux in this bin [#/m²/s]
     """
@@ -415,24 +368,7 @@ class TiffProcessor:
     
     def __init__(self, static_params, static_crs, active_categories, 
                  nx, ny, ntime, bin_diameters, size_distributions):
-        """
-        Initialize the processor
-        
-        Parameters:
-        -----------
-        static_params : dict
-            Domain parameters from static file
-        static_crs : str
-            CRS of the static domain
-        active_categories : list
-            List of active emission category patterns
-        nx, ny, ntime : int
-            Grid dimensions
-        bin_diameters : array
-            Bin mid diameters in meters
-        size_distributions : dict
-            Pre-calculated size distributions for each category
-        """
+
         self.static_params = static_params
         self.static_crs = static_crs
         self.active_categories = active_categories
@@ -914,7 +850,7 @@ class SalsaDriver:
             nc_composition_name[i, :] = np.array(list(chars), dtype="S1")
         nc_composition_name.long_name = "aerosol composition name"
 
-        # === Emission mass fractions (from literature) ===
+        # === Emission mass fractions  ===
         emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index))
         for cat in [0, 1, 2]:
             for comp_idx, comp_name in enumerate(composition_name_list):
@@ -1062,12 +998,9 @@ class SalsaDriver:
         nc_var[:] = aerosol_emission_values
 
     def validate_emissions(self):
-        """
-        Validate emission values against literature expectations
-        """
-        print("\n" + "=" * 70)
+       
         print("VALIDATION OF EMISSION VALUES")
-        print("=" * 70)
+       
         
         # Read the emission data from the file we just created
         with Dataset(self.output_file, "r") as nc:
@@ -1139,9 +1072,7 @@ class SalsaDriver:
         print(f"Successfully created: {self.output_file}")
 
 
-# =============================================================================
 # MAIN EXECUTION
-# =============================================================================
 
 if __name__ == "__main__":
     # Input paths
