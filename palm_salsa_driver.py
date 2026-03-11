@@ -35,10 +35,10 @@ warnings.filterwarnings('ignore')
 # Species properties for mass → number conversion (from Kokkola et al., 2008)
 species_properties = {
     "H2SO4": {"rho": 1840, "name": "Sulfuric acid", "molar_mass": 0.098},  # kg/mol
-    "OC":    {"rho": 1500, "name": "Organic carbon", "molar_mass": 0.012},  # kg/mol (approx)
+    "OC":    {"rho": 1500, "name": "Organic carbon", "molar_mass": 0.012},  # kg/mol 
     "BC":    {"rho": 1800, "name": "Black carbon", "molar_mass": 0.012},    # kg/mol
-    "DU":    {"rho": 2650, "name": "Mineral dust", "molar_mass": 0.060},    # kg/mol (approx)
-    "SS":    {"rho": 2200, "name": "Sea salt", "molar_mass": 0.058},        # kg/mol (NaCl)
+    "DU":    {"rho": 2650, "name": "Mineral dust", "molar_mass": 0.060},    # kg/mol 
+    "SS":    {"rho": 2200, "name": "Sea salt", "molar_mass": 0.058},        # kg/mol 
     "HNO3":  {"rho": 1500, "name": "Nitric acid", "molar_mass": 0.063},     # kg/mol
     "NH3":   {"rho": 1700, "name": "Ammonia", "molar_mass": 0.017},         # kg/mol
 }
