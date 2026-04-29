@@ -1,28 +1,19 @@
-#12 species
+##parallel procesing working
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PALM SALSA Driver Generator
-============================
-Generate aerosol emission input files for PALM's SALSA module using the methodology
-described in Kurppa et al. (2019) "Implementation of the sectional aerosol module 
-SALSA2.0 into the PALM model system 6.0"
+PALM SALSA Driver Generator 
+=================================================
+Generate aerosol emission input files for PALM's SALSA module.
+- 4 emission categories: traffic exhaust, road dust, wood combustion, other
+- Date/time range filtering for specific simulation periods
+- Category-specific GNFR sector mapping to preserve spatial structure
+- 12 aerosol species support with dynamic bin calculation
+- Uses LRU caching, GDAL Warp, precompiled regex, vectorized ops
 
-MODIFIED: Extended to support 12 aerosol species (original 7 + Pb, Hg, Ni, Cd, As)
-to match the modified salsa_mod.f90 with maxspec = 12.
-DYNAMIC BIN SUPPORT
-
-Handles all nf2a cases dynamically:
-  - nf2a = 1.0: nbin1 + nbin2 bins
-  - nf2a = 0.0: nbin1 + nbin2 bins
-  - 0.0 < nf2a < 1.0: nbin1 + 2*nbin2 bins
-
-Key scientific references:
-- Kurppa et al. (2019) GMD - Main reference for PALM-SALSA implementation
+References:
+- Kurppa et al. (2019) GMD - PALM-SALSA implementation
 - Kokkola et al. (2008) ACP - Original SALSA description
-- Kumar et al. (2009) AE - Traffic emission factors and size distributions
-- Zhang et al. (2001) AE - Dry deposition and size distributions
-- Dallmann et al. (2014) ACP - Chemical composition of traffic emissions
 """
 
 import os
@@ -30,12 +21,10 @@ import glob
 import datetime
 import re
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime
 import numpy as np
-import rasterio
 from netCDF4 import Dataset
-from rasterio.windows import Window
-from scipy.ndimage import zoom
+from osgeo import gdal
 from pyproj import Transformer
 from multiprocessing import Pool, cpu_count
 import warnings
@@ -45,12 +34,22 @@ warnings.filterwarnings('ignore')
 # USER CONFIGURATION OPTIONS
 # =============================================================================
 
+# ---- Date/Time Range for Emissions ----
+START_DATE = "2024-08-25 00:00:00"
+END_DATE   = "2024-08-25 23:00:00"
+
+# ---- Emission Categories to Include ----
+ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood', 'other']
 # Select which emission categories to include in the output
 # Options: 'traffic', 'dust', 'wood' (any combination)
-ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'dust', 'wood']  # All three
+# ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'dust', 'wood']  # All three
 # ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood']        # Exclude road dust
 # ACTIVE_OUTPUT_CATEGORIES = ['traffic']                # Only traffic
 
+# ---- Species Selection ----
+SPECIES_OUTPUT_MODE = "custom"
+CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
+#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "HNO3", "NH3"]
 # Select species for output file
 # Option 1: Original 7 species
 # SPECIES_OUTPUT_MODE = "basic7"
@@ -58,25 +57,48 @@ ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'dust', 'wood']  # All three
 # Option 2: Extended 12 species (includes Pb, Hg, Ni, Cd, As)
 # SPECIES_OUTPUT_MODE = "extended12"  # <-- Change this to "basic7" if needed
 # When using CUSTOM_SPECIES_LIST, set this to None or leave commented
-SPECIES_OUTPUT_MODE = "custom"  # Add this line - set to None when using custom list
+##SPECIES_OUTPUT_MODE = "custom"  # Add this line - set to None when using custom list
 
 # Or manually specify custom list (uncomment to use):
-# CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "NH3", "HNO3"]
-CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "NH3", "HNO3", "PB", "HG", "NI", "CD", "AS"]  # Extended list
+
+#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "NH3", "HNO3", "PB", "HG", "NI", "CD", "AS"]  # Extended list
+
+# =============================================================================
+# CATEGORY-SPECIFIC GNFR SECTOR MAPPING
+# =============================================================================
+
+GNFR_SECTOR_TO_CATEGORY = {
+    'F_RoadTransport': 0,
+    'A_PublicPower': 2,
+    'B_Industry': 2,
+    'C_OtherStationaryComb': 2,
+    'D_Fugitives': 3,
+    'E_Solvents': 3,
+    'G_Shipping': 3,
+    'H_Aviation': 3,
+    'I_OffRoad': 3,
+    'J_Waste': 3,
+    'K_AgriLivestock': 3,
+    'L_AgriOther': 3,
+}
+
+def get_category_from_band(band_name):
+    """category lookup"""
+    if band_name is None:
+        return [3]
+    categories = []
+    for sector_pattern, category in GNFR_SECTOR_TO_CATEGORY.items():
+        if sector_pattern in band_name:
+            categories.append(category)
+    return categories if categories else [3]
 
 # =============================================================================
 # CONSTANTS - DYNAMIC BIN CONFIGURATION
 # =============================================================================
 
-# PALM/SALSA configuration parameters - CHANGE THESE AS NEEDED!
-NBIN = [3, 7]                              # [nbin1, nbin2] - ANY combination works!
-REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]        # [d_min, d_split, d_max]
-NF2A = 0.75                                # 0.0 to 1.0
-
-# These will be calculated dynamically based on NBIN and NF2A
-NBIN1 = NBIN[0]
-NBIN2 = NBIN[1]
-# Total bins calculated in calculate_palm_bin_diameters()
+NBIN = [3, 7]
+REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
+NF2A = 0.75
 
 # Species properties for mass → number conversion
 species_properties = {
@@ -94,115 +116,219 @@ species_properties = {
     "AS":    {"rho": 5727, "name": "Arsenic", "molar_mass": 0.074922},
 }
 
-# Species-specific 2a partitioning (only used when 0 < nf2a < 1)
 SPECIES_2A_FRACTION = {
     "H2SO4": 0.90, "OC": 0.70, "BC": 0.10, "DU": 0.10,
     "SS": 0.90, "NH3": 0.90, "HNO3": 0.90,
     "PB": 0.50, "HG": 0.50, "NI": 0.50, "CD": 0.50, "AS": 0.50,
 }
 
-# Log-normal size distribution parameters
 SIZE_DISTRIBUTIONS = {
-    0: {"name": "Traffic exhaust", "modes": [
-            {"Dg": 20e-9, "sigma": 1.5, "weight": 0.4},
-            {"Dg": 60e-9, "sigma": 1.8, "weight": 0.6}]},
-    1: {"name": "Road dust", "modes": [
-            {"Dg": 2.5e-6, "sigma": 2.0, "weight": 1.0}]},
-    2: {"name": "Wood combustion", "modes": [
-            {"Dg": 80e-9, "sigma": 1.6, "weight": 1.0}]}
+    0: {"name": "traffic exhaust", "modes": [
+            {"Dg": 13.5e-9, "sigma": 1.6, "weight": 0.016},
+            {"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.984}],
+    },
+    1: {"name": "road dust", "modes": [
+            {"Dg": 1.4e-6, "sigma": 1.4, "weight": 1.0}],
+    },
+    2: {"name": "wood combustion", "modes": [
+            {"Dg": 5.4e-8, "sigma": 1.7, "weight": 1.0}],
+    },
+    3: {"name": "other", "modes": [
+            {"Dg": 60.0e-9, "sigma": 1.7, "weight": 1.0}],
+    }
 }
 
-# Chemical composition
 CATEGORY_COMPOSITION = {
-    0: {"H2SO4": 0.04, "OC": 0.48, "BC": 0.48, "DU": 0.00,
-        "SS": 0.00, "HNO3": 0.00, "NH3": 0.00,
+    0: {"H2SO4": 0.04, "OC": 0.44, "BC": 0.44, "DU": 0.02,
+        "SS": 0.00, "HNO3": 0.06, "NH3": 0.00,
         "PB": 0.0001, "HG": 0.00001, "NI": 0.0002, "CD": 0.00005, "AS": 0.00004},
-    1: {"H2SO4": 0.01, "OC": 0.05, "BC": 0.02, "DU": 0.90,
-        "SS": 0.02, "HNO3": 0.00, "NH3": 0.00,
+    1: {"H2SO4": 0.00, "OC": 0.05, "BC": 0.00, "DU": 0.90,
+        "SS": 0.00, "HNO3": 0.05, "NH3": 0.00,
         "PB": 0.0005, "HG": 0.00002, "NI": 0.0003, "CD": 0.0001, "AS": 0.00008},
-    2: {"H2SO4": 0.02, "OC": 0.70, "BC": 0.28, "DU": 0.00,
-        "SS": 0.00, "HNO3": 0.00, "NH3": 0.00,
-        "PB": 0.00005, "HG": 0.00001, "NI": 0.0001, "CD": 0.00003, "AS": 0.0001}
+    2: {"H2SO4": 0.00, "OC": 0.46, "BC": 0.46, "DU": 0.02,
+        "SS": 0.00, "HNO3": 0.06, "NH3": 0.00,
+        "PB": 0.00005, "HG": 0.00001, "NI": 0.0001, "CD": 0.00003, "AS": 0.0001},
+    3: {"H2SO4": 0.00, "OC": 0.44, "BC": 0.44, "DU": 0.02,
+        "SS": 0.00, "HNO3": 0.10, "NH3": 0.00,
+        "PB": 0.0001, "HG": 0.00002, "NI": 0.0002, "CD": 0.00005, "AS": 0.00008},
 }
 
 SPECIES_CATEGORY_MAPPING = {
-    "oc": {"target": "OC", "categories": [0, 2]},
-    "bc": {"target": "BC", "categories": [0, 2]},
-    "ec": {"target": "BC", "categories": [0, 2]},
-    "so2": {"target": "H2SO4", "categories": [0, 2]},
-    "no": {"target": "HNO3", "categories": [0, 2]},
-    "no2": {"target": "HNO3", "categories": [0, 2]},
-    "nh3": {"target": "NH3", "categories": [0, 2]},
-    #"pm10": {"target": "DU", "categories": [0, 1, 2]},
-    "othmin": {"target": "DU", "categories": [0, 1, 2]},
-    "pb": {"target": "PB", "categories": [0, 1]},
-    "hg": {"target": "HG", "categories": [0, 1]},
-    "ni": {"target": "NI", "categories": [0, 1]},
-    "cd": {"target": "CD", "categories": [0, 1]},
-    "as": {"target": "AS", "categories": [0, 1]},
-    "na": {"target": "SS", "categories": [1]},
+    "oc": {"target": "OC"}, "bc": {"target": "BC"}, "ec": {"target": "BC"},
+    "so2": {"target": "H2SO4"}, "no": {"target": "HNO3"}, "no2": {"target": "HNO3"},
+    "nh3": {"target": "NH3"}, "othmin": {"target": "DU"},
+    "pb": {"target": "PB"}, "hg": {"target": "HG"}, "ni": {"target": "NI"},
+    "cd": {"target": "CD"}, "as": {"target": "AS"}, "na": {"target": "SS"},
 }
 
 BULK_SPECIES = ['ho2', 'h2o', 'o3', 'ro2', 'oh', 'rcho', 'n2o', 
-                'nmvoc', 'voc', 'co', 'co2', 'ch4', 'pm25', 'pmcoarse']
+                'nmvoc', 'voc', 'co', 'co2', 'ch4', 'pm25', 'pmcoarse',
+                'pm2_5', 'pm10', 'so4', 'nox']
 
-# Projection
 CONFIG_PROJ = "EPSG:25832"
 DEFAULT_PROJ = "EPSG:4326"
 transformer_to_utm = Transformer.from_crs(DEFAULT_PROJ, CONFIG_PROJ, always_xy=True)
 transformer_to_wgs = Transformer.from_crs(CONFIG_PROJ, DEFAULT_PROJ, always_xy=True)
 
+# =============================================================================
+# GLOBAL CACHE 
+# =============================================================================
+
+_geotiff_cache = {}
+_cache_order = []
+_MAX_CACHE_SIZE = 5
+
+# Pre-compiled regex for band parsing
+BAND_PATTERN = re.compile(r'^([A-Za-z_]+)_h(\d{2})_(\d{8})$')
 
 # =============================================================================
-# FULLY DYNAMIC BIN CALCULATION - WORKS FOR ANY NBIN!
+# DATE/TIME PARSING FUNCTIONS
+# =============================================================================
+
+def parse_date_range(start_str, end_str):
+    """Parse date range and calculate hours"""
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+    time_diff = end_dt - start_dt
+    n_hours = int(time_diff.total_seconds() / 3600) + 1
+    print(f"Date range: {start_dt} to {end_dt}")
+    print(f"Number of hours: {n_hours}")
+    return start_dt, end_dt, n_hours
+
+
+def create_all_time_steps(start_dt, end_dt):
+    """Pre-compute ALL expected time steps"""
+    current_dt = start_dt
+    time_steps = []
+    while current_dt <= end_dt:
+        time_steps.append({
+            'date': current_dt.strftime("%Y%m%d"),
+            'hour': current_dt.hour,
+            'hour_str': f"h{current_dt.hour:02d}",
+            'datetime': current_dt
+        })
+        current_dt += timedelta(hours=1)
+    return time_steps
+
+
+def parse_band_description(desc):
+    """band parsing with pre-compiled regex"""
+    match = BAND_PATTERN.match(desc)
+    if match:
+        sector, hour_str, date_str = match.groups()
+        hour = int(hour_str)
+        band_dt = datetime(int(date_str[0:4]), int(date_str[4:6]), 
+                          int(date_str[6:8]), hour, 0, 0)
+        return sector, hour, date_str, band_dt
+    return None
+
+
+# =============================================================================
+# GEOTIFF RESAMPLING 
+# =============================================================================
+
+def resample_entire_geotiff(geotiff_path, static_params):
+    """GeoTIFF resampling with LRU cache"""
+    global _geotiff_cache, _cache_order
+    
+    if geotiff_path in _geotiff_cache:
+        _cache_order.remove(geotiff_path)
+        _cache_order.insert(0, geotiff_path)
+        return _geotiff_cache[geotiff_path]
+    
+    if not os.path.exists(geotiff_path):
+        raise FileNotFoundError(f"GeoTIFF file not found: {geotiff_path}")
+    
+    print(f"  Resampling: {os.path.basename(geotiff_path)}")
+    
+    warp_options = gdal.WarpOptions(
+        format='MEM',
+        outputBounds=[static_params['west'], static_params['south'], 
+                     static_params['east'], static_params['north']],
+        width=static_params['nx'],
+        height=static_params['ny'],
+        dstSRS=CONFIG_PROJ,
+        resampleAlg=gdal.GRA_NearestNeighbour
+    )
+    
+    resampled_ds = gdal.Warp('', geotiff_path, options=warp_options)
+    
+    if resampled_ds is None:
+        raise RuntimeError(f"Failed to resample GeoTIFF: {geotiff_path}")
+    
+    # Read all bands at once
+    num_bands = resampled_ds.RasterCount
+    all_bands_data = []
+    
+    for band_num in range(1, num_bands + 1):
+        band = resampled_ds.GetRasterBand(band_num)
+        arr = band.ReadAsArray().astype(np.float32)
+        arr = np.flipud(arr)  # Match PALM coordinate system
+        all_bands_data.append(arr)
+    
+    # LRU cache management
+    if len(_cache_order) >= _MAX_CACHE_SIZE:
+        oldest = _cache_order.pop()
+        del _geotiff_cache[oldest]
+    
+    _geotiff_cache[geotiff_path] = all_bands_data
+    _cache_order.insert(0, geotiff_path)
+    
+    resampled_ds = None
+    return all_bands_data
+
+
+def read_geotiff_band(geotiff_path, band_num, static_params):
+    """band reading with cache"""
+    global _geotiff_cache
+    
+    if geotiff_path not in _geotiff_cache:
+        all_bands = resample_entire_geotiff(geotiff_path, static_params)
+    else:
+        all_bands = _geotiff_cache[geotiff_path]
+        _cache_order.remove(geotiff_path)
+        _cache_order.insert(0, geotiff_path)
+    
+    if band_num - 1 < len(all_bands):
+        return all_bands[band_num - 1].copy()
+    else:
+        raise ValueError(f"Band {band_num} not found in {geotiff_path}")
+
+
+def clear_geotiff_cache():
+    """Clear cache to free memory"""
+    global _geotiff_cache, _cache_order
+    _geotiff_cache.clear()
+    _cache_order.clear()
+    import gc
+    gc.collect()
+
+
+# =============================================================================
+# BIN CALCULATION FUNCTIONS 
 # =============================================================================
 
 def calculate_palm_bin_diameters(reglim, nbin, nf2a):
-    """
-    Calculate bin diameters exactly as PALM does.
-    FULLY DYNAMIC - works for any nbin = [n1, n2]!
-    
-    Parameters:
-    -----------
-    reglim : list
-        [d_min, d_split, d_max] - 3 values defining 2 subranges
-    nbin : list
-        [nbin1, nbin2] - ANY number of bins in subrange 1 and 2
-    nf2a : float
-        Fraction of subrange 2 allocated to 2a (0.0 to 1.0)
-    
-    Returns:
-    --------
-    dmid : array - Bin mid diameters in meters
-    dlow : array - Bin lower boundaries
-    dhigh : array - Bin upper boundaries
-    subrange_labels : array - Labels for each bin
-    has_2a : bool - Whether subrange 2a exists
-    has_2b : bool - Whether subrange 2b exists
-    nbins_total : int - Total number of bins
-    """
+    """Calculate bin diameters exactly as PALM does"""
     d_min, d_split, d_max = reglim
     nbin1, nbin2 = nbin
     
-    # Determine which subranges exist based on nf2a
     has_2a = (nf2a > 0.0)
     has_2b = (nf2a < 1.0)
     
-    # Calculate total bins dynamically
     if has_2a and has_2b:
-        nbins_total = nbin1 + nbin2 + nbin2  # Both 2a and 2b
+        nbins_total = nbin1 + nbin2 + nbin2
     elif has_2a:
-        nbins_total = nbin1 + nbin2  # Only 2a
+        nbins_total = nbin1 + nbin2
     elif has_2b:
-        nbins_total = nbin1 + nbin2  # Only 2b
+        nbins_total = nbin1 + nbin2
     else:
-        nbins_total = nbin1  # Neither (should not happen)
+        nbins_total = nbin1
     
     dmid = np.zeros(nbins_total)
     dlow = np.zeros(nbins_total)
     dhigh = np.zeros(nbins_total)
     
-    # Build label list dynamically
     labels = ['1'] * nbin1
     if has_2a:
         labels.extend(['2a'] * nbin2)
@@ -210,92 +336,68 @@ def calculate_palm_bin_diameters(reglim, nbin, nf2a):
         labels.extend(['2b'] * nbin2)
     subrange_labels = np.array(labels, dtype=str)
     
-    # Subrange 1: d_min to d_split (nbin1 bins)
     ratio_1 = d_split / d_min
     for i in range(nbin1):
         d_low = d_min * ratio_1**(i / nbin1)
         d_high = d_min * ratio_1**((i+1) / nbin1)
-        dlow[i] = d_low
-        dhigh[i] = d_high
+        dlow[i] = d_low; dhigh[i] = d_high
         dmid[i] = np.sqrt(d_low * d_high)
     
-    # Subrange 2: d_split to d_max (nbin2 bins each for 2a/2b)
     ratio_2 = d_max / d_split
     bin_offset = nbin1
     
-    # Subrange 2a (if exists)
     if has_2a:
         for i in range(nbin2):
             idx = bin_offset + i
             d_low = d_split * ratio_2**(i / nbin2)
             d_high = d_split * ratio_2**((i+1) / nbin2)
-            dlow[idx] = d_low
-            dhigh[idx] = d_high
+            dlow[idx] = d_low; dhigh[idx] = d_high
             dmid[idx] = np.sqrt(d_low * d_high)
         bin_offset += nbin2
     
-    # Subrange 2b (if exists)
     if has_2b:
         for i in range(nbin2):
             idx = bin_offset + i
             d_low = d_split * ratio_2**(i / nbin2)
             d_high = d_split * ratio_2**((i+1) / nbin2)
-            dlow[idx] = d_low
-            dhigh[idx] = d_high
+            dlow[idx] = d_low; dhigh[idx] = d_high
             dmid[idx] = np.sqrt(d_low * d_high)
     
     return dmid, dlow, dhigh, subrange_labels, has_2a, has_2b, nbins_total
 
 
 def lognormal_pdf(d, dg, sigma_g):
-    """Log-normal probability density function"""
-    # Add small epsilon to avoid division by zero
+    """Log-normal PDF"""
     d_safe = np.maximum(d, 1e-30)
     return (1.0 / (d_safe * np.log(sigma_g) * np.sqrt(2 * np.pi))) * \
            np.exp(-(np.log(d_safe / dg)**2) / (2 * np.log(sigma_g)**2))
 
 
 def get_size_distribution_fractions(category, bin_diameters, subrange_labels, nf2a, has_2a, has_2b):
-    """
-    Calculate number fractions in each PALM bin.
-    FULLY DYNAMIC - works for any bin configuration!
-    """
+    """Calculate number fractions"""
     if category not in SIZE_DISTRIBUTIONS:
         raise ValueError(f"Unknown category: {category}")
     
     dist_info = SIZE_DISTRIBUTIONS[category]
     modes = dist_info["modes"]
     
-    # Calculate base PDF at each bin diameter
     pdf_values = np.zeros(len(bin_diameters))
-    
     for mode in modes:
-        dg = mode["Dg"]
-        sigma = mode["sigma"]
-        weight = mode["weight"]
-        mode_pdf = lognormal_pdf(bin_diameters, dg, sigma)
-        pdf_values += weight * mode_pdf
+        pdf_values += mode["weight"] * lognormal_pdf(bin_diameters, mode["Dg"], mode["sigma"])
     
     fractions = pdf_values.copy()
-    
-    # Apply nf2a splitting only if both modes exist
     if has_2a and has_2b:
         mask_2a = subrange_labels == '2a'
         mask_2b = subrange_labels == '2b'
-        fractions[mask_2a] = fractions[mask_2a] * nf2a
-        fractions[mask_2b] = fractions[mask_2b] * (1.0 - nf2a)
-    # If only one mode exists, no splitting needed
+        fractions[mask_2a] *= nf2a
+        fractions[mask_2b] *= (1.0 - nf2a)
     
-    # Normalize
     total = np.sum(fractions)
-    if total > 0:
-        fractions = fractions / total
-    
-    return fractions
+    return fractions / total if total > 0 else fractions
 
 
 def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
-    """Convert mass flux to number flux for a specific size bin"""
+    """Mass to number conversion"""
     if species not in species_properties:
         raise ValueError(f"Unknown species: {species}")
     
@@ -306,46 +408,24 @@ def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
     
     with np.errstate(divide='ignore', invalid='ignore'):
         number_flux = np.where((particle_mass > 0) & (bin_mass_flux > 0), 
-                               bin_mass_flux / particle_mass, 
-                               0.0)
-    
+                               bin_mass_flux / particle_mass, 0.0)
     return number_flux
 
 
-def extract_hour_from_band_name(band_name):
-    if not band_name:
-        return None
-    hour_match = re.search(r'h(\d{1,2})', band_name)
-    if hour_match:
-        hour = int(hour_match.group(1))
-        if 0 <= hour <= 23:
-            return hour
-        else:
-            return 0 if hour == 24 else None
-    return None
-
-
-def pattern_match(band_name, patterns):
-    for pattern in patterns:
-        regex_pattern = pattern.replace('*', '.*')
-        if re.match(regex_pattern, band_name, re.IGNORECASE):
-            return True
-    return False
-
-
 def get_crs_from_netcdf(nc_file):
+    """Extract CRS from NetCDF"""
     try:
         if hasattr(nc_file, 'crs'):
             crs_str = nc_file.crs
             if 'EPSG' in crs_str:
-                epsg_code = crs_str.split('EPSG:')[-1].split()[0]
-                return f"EPSG:{epsg_code}"
+                return f"EPSG:{crs_str.split('EPSG:')[-1].split()[0]}"
         return CONFIG_PROJ
     except:
         return CONFIG_PROJ
 
 
 def extract_static_domain(static_nc):
+    """Extract domain parameters from static file"""
     params = {}
     params['origin_time'] = static_nc.getncattr('origin_time')
     params['origin_lat'] = static_nc.getncattr('origin_lat')
@@ -370,7 +450,6 @@ def extract_static_domain(static_nc):
     params['east'] = center_x + half_nx
     params['south'] = center_y - half_ny
     params['north'] = center_y + half_ny
-    
     params['origin_x'] = params['west']
     params['origin_y'] = params['north']
     
@@ -383,122 +462,104 @@ def extract_static_domain(static_nc):
 
 
 # =============================================================================
-# TIFF PROCESSOR CLASS - DYNAMIC BIN SUPPORT
+# TIFF PROCESSOR
 # =============================================================================
 
 class TiffProcessor:
-    def __init__(self, static_params, static_crs, active_categories, 
-                 nx, ny, ntime, bin_diameters, bin_low, bin_high, subrange_labels,
-                 size_distributions, nf2a, has_2a, has_2b, nbins_total):
+    """
+    TIFF processor using:
+    - Pre-compiled regex for band parsing
+    - LRU cache for resampled data
+    - GDAL Warp for fast resampling
+    - Vectorized operations
+    - Pre-computed bin volumes
+    """
+    
+    def __init__(self, static_params, nx, ny, ntime, bin_diameters, 
+                 subrange_labels, size_distributions, nf2a, has_2a, has_2b, 
+                 nbins_total, start_dt, end_dt, time_steps):
         self.static_params = static_params
-        self.static_crs = static_crs
-        self.active_categories = active_categories
         self.nx = nx
         self.ny = ny
         self.ntime = ntime
         self.bin_diameters = bin_diameters
-        self.bin_low = bin_low
-        self.bin_high = bin_high
         self.subrange_labels = subrange_labels
-        self.nbins = nbins_total  # Dynamic!
+        self.nbins = nbins_total
         self.size_distributions = size_distributions
         self.nf2a = nf2a
         self.has_2a = has_2a
         self.has_2b = has_2b
+        self.start_dt = start_dt
+        self.end_dt = end_dt
+        self.time_steps = time_steps  # Pre-computed!
         
-        self.static_xmin = static_params['west']
-        self.static_xmax = static_params['east']
-        self.static_ymin = static_params['south']
-        self.static_ymax = static_params['north']
+        # Pre-compute time step lookup for O(1) access
+        self.time_index_lookup = {}
+        for idx, ts in enumerate(time_steps):
+            key = (ts['date'], ts['hour'])
+            self.time_index_lookup[key] = idx
+        
+        # Pre-compute bin volumes (avoid repeated calculation)
+        self.bin_volumes = np.array([
+            (4.0/3.0) * np.pi * (d/2.0)**3 for d in bin_diameters
+        ], dtype=np.float32)
+        
+        # Pre-compute conversion factor (kg/m2/yr → kg/m2/s)
+        self.conv_factor = np.float32(1.0 / (365.25 * 24 * 3600))
     
-    def get_tiff_extent(self, tiff_file):
-        with rasterio.open(tiff_file) as src:
-            transform = src.transform
-            width = src.width
-            height = src.height
-            tiff_crs = src.crs.to_string() if src.crs else CONFIG_PROJ
-            left = transform[2]
-            top = transform[5]
-            right = left + transform[0] * width
-            bottom = top + transform[4] * height
-            return left, bottom, right, top, transform, tiff_crs, width, height
-
-    def convert_extent_to_target_crs(self, left, bottom, right, top, source_crs, target_crs):
-        if source_crs == target_crs:
-            return left, bottom, right, top
-        try:
-            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
-            left_top = transformer.transform(left, top)
-            right_top = transformer.transform(right, top)
-            right_bottom = transformer.transform(right, bottom)
-            left_bottom = transformer.transform(left, bottom)
-            x_coords = [left_top[0], right_top[0], right_bottom[0], left_bottom[0]]
-            y_coords = [left_top[1], right_top[1], right_bottom[1], left_bottom[1]]
-            new_left = min(x_coords)
-            new_right = max(x_coords)
-            new_bottom = min(y_coords)
-            new_top = max(y_coords)
-            return new_left, new_bottom, new_right, new_top
-        except Exception as e:
-            print(f"Error converting CRS: {e}")
-            return left, bottom, right, top
-
-    def crop_tiff_to_static_domain(self, tiff_file, band_idx=1):
-        (tiff_left, tiff_bottom, tiff_right, tiff_top, 
-         tiff_transform, tiff_crs, tiff_width, tiff_height) = self.get_tiff_extent(tiff_file)
+    def get_band_info(self, geotiff_path):
+        """
+        band info extraction using pre-compiled regex and GDAL.
+        Returns only bands within the date range, organized by time step.
+        """
+        ds = gdal.Open(geotiff_path, gdal.GA_ReadOnly)
+        if not ds:
+            return None
         
-        if tiff_crs != self.static_crs:
-            tiff_left, tiff_bottom, tiff_right, tiff_top = self.convert_extent_to_target_crs(
-                tiff_left, tiff_bottom, tiff_right, tiff_top, tiff_crs, self.static_crs
-            )
+        # Dictionary: time_index -> list of band numbers
+        band_info = {}
+        total_bands = ds.RasterCount
         
-        if (tiff_right < self.static_xmin or tiff_left > self.static_xmax or
-            tiff_top < self.static_ymin or tiff_bottom > self.static_ymax):
-            return np.zeros((self.ny, self.nx))
+        for band_num in range(1, total_bands + 1):
+            band = ds.GetRasterBand(band_num)
+            desc = band.GetDescription()
+            if desc:
+                parsed = parse_band_description(desc)
+                if parsed is not None:
+                    sector, hour, date_str, band_dt = parsed
+                    
+                    # Check if within date range
+                    if self.start_dt <= band_dt <= self.end_dt:
+                        # Get time index from pre-computed lookup
+                        time_key = (date_str, hour)
+                        time_idx = self.time_index_lookup.get(time_key)
+                        
+                        if time_idx is not None:
+                            # Get categories for this sector
+                            categories = get_category_from_band(desc)
+                            
+                            if time_idx not in band_info:
+                                band_info[time_idx] = []
+                            band_info[time_idx].append({
+                                'band_num': band_num,
+                                'categories': categories
+                            })
         
-        overlap_left = max(tiff_left, self.static_xmin)
-        overlap_right = min(tiff_right, self.static_xmax)
-        overlap_bottom = max(tiff_bottom, self.static_ymin)
-        overlap_top = min(tiff_top, self.static_ymax)
-        
-        pixel_width = tiff_transform[0]
-        pixel_height = abs(tiff_transform[4])
-        
-        col_start = int((overlap_left - tiff_left) / pixel_width)
-        row_start = int((tiff_top - overlap_top) / pixel_height)
-        cols_to_read = int((overlap_right - overlap_left) / pixel_width)
-        rows_to_read = int((overlap_top - overlap_bottom) / pixel_height)
-        
-        col_start = max(0, min(col_start, tiff_width - 1))
-        row_start = max(0, min(row_start, tiff_height - 1))
-        cols_to_read = max(1, min(cols_to_read, tiff_width - col_start))
-        rows_to_read = max(1, min(rows_to_read, tiff_height - row_start))
-        
-        with rasterio.open(tiff_file) as src:
-            window = Window(col_start, row_start, cols_to_read, rows_to_read)
-            arr = src.read(band_idx, window=window)
-            
-            if arr.shape != (self.ny, self.nx):
-                if arr.shape[0] > 0 and arr.shape[1] > 0:
-                    zoom_factors = (self.ny / arr.shape[0], self.nx / arr.shape[1])
-                    arr = zoom(arr, zoom_factors, order=1)
-                else:
-                    arr = np.zeros((self.ny, self.nx))
-            
-            arr = arr / (365.25 * 24 * 3600)
-            arr = np.flipud(arr)
-            return arr
-
-    def get_band_names(self, tiff_file):
-        with rasterio.open(tiff_file) as src:
-            return src.descriptions
-
+        ds = None
+        return band_info if band_info else None
+    
     def process_single_file(self, tiff_file):
+        """
+        Process a single TIFF file.
+        Uses cached resampled data and vectorized operations.
+        """
         filename = os.path.basename(tiff_file).lower()
         
+        # Skip bulk species
         if any(bulk in filename for bulk in BULK_SPECIES):
             return None
         
+        # Find matching species
         species = None
         for key in SPECIES_CATEGORY_MAPPING.keys():
             if key in filename:
@@ -513,80 +574,102 @@ class TiffProcessor:
             return None
         
         target_species = mapping["target"]
-        categories = mapping["categories"]
         
-        if not categories:
+        # Get band info
+        band_info = self.get_band_info(tiff_file)
+        
+        if band_info is None:
+            print(f"\n  Skipping {filename}: No bands in date range")
             return None
         
-        print(f"\nProcessing {filename}")
+        total_bands_to_process = sum(len(bands) for bands in band_info.values())
+        
+        print(f"\n{'─'*60}")
+        print(f"File: {filename}")
         print(f"  Species: {species} → {target_species}")
+        print(f"  Bands to process: {total_bands_to_process} (across {len(band_info)} time steps)")
         
-        band_names = self.get_band_names(tiff_file)
-        if not band_names or all(name is None for name in band_names):
-            return None
-        
-        # Dynamic bin count!
-        category_emissions = {
-            cat: np.zeros((self.ntime, self.ny, self.nx, self.nbins))
-            for cat in [0, 1, 2]
-        }
+        # Initialize accumulators for 4 categories
+        category_emissions = {}
+        for cat in [0, 1, 2, 3]:
+            category_emissions[cat] = np.zeros((self.ntime, self.ny, self.nx, self.nbins), 
+                                               dtype=np.float32)
         
         f_2a = SPECIES_2A_FRACTION.get(target_species, 0.5)
         
+        # Pre-load resampled data (cached)
+        try:
+            all_bands_data = resample_entire_geotiff(tiff_file, self.static_params)
+        except:
+            print(f"  ERROR: Failed to resample {tiff_file}")
+            return None
+        
         bands_processed = 0
-        for band_idx, band_name in enumerate(band_names, 1):
-            if not band_name:
-                continue
-            if not pattern_match(band_name, self.active_categories):
-                continue
-            
-            hour = extract_hour_from_band_name(band_name)
-            if hour is None or hour >= self.ntime:
-                hour = (band_idx - 1) % self.ntime
-            
-            mass_data = self.crop_tiff_to_static_domain(tiff_file, band_idx)
-            if np.all(mass_data == 0):
+        
+        # Process by time step
+        for time_idx, bands in band_info.items():
+            if time_idx >= self.ntime:
                 continue
             
-            bands_processed += 1
-            
-            for cat in categories:
-                mass_frac = CATEGORY_COMPOSITION[cat].get(target_species, 0.0)
-                if mass_frac <= 0:
+            for band_entry in bands:
+                band_num = band_entry['band_num']
+                categories = band_entry['categories']
+                
+                # Read band data from cache
+                if band_num - 1 < len(all_bands_data):
+                    mass_data = all_bands_data[band_num - 1]
+                else:
                     continue
                 
-                size_fracs_base = self.size_distributions[cat]
-                species_mass = mass_data * mass_frac
+                if np.all(mass_data == 0):
+                    continue
                 
-                for bin_idx in range(self.nbins):
-                    base_frac = size_fracs_base[bin_idx]
-                    label = self.subrange_labels[bin_idx]
-                    
-                    if self.has_2a and self.has_2b:
-                        if label == '2a':
-                            adjusted_frac = base_frac * f_2a
-                        elif label == '2b':
-                            adjusted_frac = base_frac * (1.0 - f_2a)
-                        else:
-                            adjusted_frac = base_frac
-                    else:
-                        adjusted_frac = base_frac
-                    
-                    if adjusted_frac <= 0:
+                # Convert units: kg/m2/yr → kg/m2/s
+                mass_data = mass_data * self.conv_factor
+                
+                bands_processed += 1
+                
+                # Process for each category
+                for cat in categories:
+                    mass_frac = CATEGORY_COMPOSITION[cat].get(target_species, 0.0)
+                    if mass_frac <= 0:
                         continue
                     
-                    number_flux = mass_to_number_conversion(
-                        species_mass, target_species,
-                        self.bin_diameters[bin_idx], adjusted_frac
-                    )
-                    category_emissions[cat][hour, :, :, bin_idx] += number_flux
+                    size_fracs = self.size_distributions[cat]
+                    species_mass = mass_data * mass_frac
+                    
+                    # Pre-compute adjusted fractions
+                    adjusted_fracs = size_fracs.copy()
+                    if self.has_2a and self.has_2b:
+                        mask_2a = self.subrange_labels == '2a'
+                        mask_2b = self.subrange_labels == '2b'
+                        adjusted_fracs[mask_2a] *= f_2a
+                        adjusted_fracs[mask_2b] *= (1.0 - f_2a)
+                    
+                    # Vectorized bin processing
+                    for bin_idx in range(self.nbins):
+                        if adjusted_fracs[bin_idx] <= 0:
+                            continue
+                        
+                        bin_mass = species_mass * adjusted_fracs[bin_idx]
+                        particle_mass = species_properties[target_species]["rho"] * self.bin_volumes[bin_idx]
+                        
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            number_flux = np.where((particle_mass > 0) & (bin_mass > 0),
+                                                   bin_mass / particle_mass, 0.0)
+                        
+                        category_emissions[cat][time_idx, :, :, bin_idx] += number_flux
+        
+        print(f"  Processed: {bands_processed} bands")
         
         if bands_processed == 0:
             return None
         
+        # Build results
         results = {}
-        for cat in categories:
-            results[f"cat_{cat}"] = category_emissions[cat]
+        for cat in [0, 1, 2, 3]:
+            if np.any(category_emissions[cat] > 0):
+                results[f"cat_{cat}"] = category_emissions[cat]
         results['species'] = species
         results['target'] = target_species
         
@@ -594,13 +677,15 @@ class TiffProcessor:
 
 
 # =============================================================================
-# MAIN SALSA DRIVER CLASS - FULLY DYNAMIC
+# MAIN SALSA DRIVER CLASS
 # =============================================================================
 
 class SalsaDriver:
+    """Generate PALM SALSA aerosol emission driver"""
+    
     def __init__(self, static_file, tiff_dir, output_file, active_categories=None):
         print("=" * 70)
-        print("PALM-SALSA Driver Generator - DYNAMIC BIN VERSION")
+        print("PALM-SALSA Driver Generator")
         print("=" * 70)
         
         self.active_output_categories = ACTIVE_OUTPUT_CATEGORIES
@@ -609,7 +694,15 @@ class SalsaDriver:
         self.reglim = REGLIM
         self.nf2a = NF2A
         
-        self.category_name_to_idx = {'traffic': 0, 'dust': 1, 'wood': 2}
+        # Parse date range
+        self.start_dt, self.end_dt, self.ntime = parse_date_range(START_DATE, END_DATE)
+        
+        # Pre-compute time steps
+        self.time_steps = create_all_time_steps(self.start_dt, self.end_dt)
+        print(f"Pre-computed {len(self.time_steps)} time steps")
+        
+        # 4 CATEGORIES
+        self.category_name_to_idx = {'traffic': 0, 'dust': 1, 'wood': 2, 'other': 3}
         
         # Determine species list
         if SPECIES_OUTPUT_MODE == "custom" and 'CUSTOM_SPECIES_LIST' in globals():
@@ -620,34 +713,19 @@ class SalsaDriver:
             self.composition_name_list = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3",
                                            "PB", "HG", "NI", "CD", "AS"]
         
-        print(f"\nConfiguration (DYNAMIC - works for ANY nbin!):")
+        print(f"\nConfiguration:")
+        print(f"  Date range: {self.start_dt} to {self.end_dt}")
+        print(f"  Time steps: {self.ntime}")
         print(f"  nbin = {self.nbin}")
-        print(f"  reglim = {self.reglim}")
         print(f"  nf2a = {self.nf2a}")
         
-        # Calculate bin structure dynamically
+        # Calculate bin structure
         (self.bin_diameters, self.bin_low, self.bin_high, 
          self.subrange_labels, self.has_2a, self.has_2b, self.nbins_total) = \
             calculate_palm_bin_diameters(self.reglim, self.nbin, self.nf2a)
         
-        self.nbin1 = self.nbin[0]
-        self.nbin2 = self.nbin[1]
-        
-        # Summary
-        print(f"\nBin structure for nf2a = {self.nf2a}:")
-        print(f"  Subrange 1: {self.nbin1} bins (always present)")
-        if self.has_2a:
-            print(f"  Subrange 2a: {self.nbin2} bins (nf2a = {self.nf2a})")
-        if self.has_2b:
-            print(f"  Subrange 2b: {self.nbin2} bins (1-nf2a = {1-self.nf2a:.2f})")
-        print(f"  TOTAL BINS: {self.nbins_total}")
-        
-        if self.nf2a == 1.0:
-            print(f"  NOTE: nf2a = 1.0 → NO subrange 2b")
-        elif self.nf2a == 0.0:
-            print(f"  NOTE: nf2a = 0.0 → NO subrange 2a")
-        
-        print(f"\nSpecies: {len(self.composition_name_list)} species")
+        print(f"\nBin structure: {self.nbins_total} bins "
+              f"(1: {self.nbin[0]}, 2a: {self.nbin[1]}, 2b: {self.nbin[1] if self.has_2b else 0})")
         
         self.selected_cat_indices = [self.category_name_to_idx[name] 
                                       for name in self.active_output_categories]
@@ -660,41 +738,24 @@ class SalsaDriver:
         self.static_nc = Dataset(static_file, "r")
         self.output_file = output_file
         self.tiff_dir = tiff_dir
-        self.active_categories = active_categories if active_categories else ['*']
         
         self.static_params = extract_static_domain(self.static_nc)
         self.nx = self.static_params['nx']
         self.ny = self.static_params['ny']
-        self.ntime = 24
         self.static_x = self.static_nc.variables["x"][:]
         self.static_y = self.static_nc.variables["y"][:]
-        self.static_crs = get_crs_from_netcdf(self.static_nc)
         
-        print(f"Domain: {self.nx} x {self.ny} grid points")
-        
-        # Print all bins
-        print(f"\nBin details ({self.nbins_total} bins):")
-        for i, (d, label) in enumerate(zip(self.bin_diameters, self.subrange_labels)):
-            print(f"  Bin {i+1:2d} [{label}]: {d*1e9:.1f} nm "
-                  f"[{self.bin_low[i]*1e9:.1f}-{self.bin_high[i]*1e9:.1f}] nm")
+        print(f"Domain: {self.nx} x {self.ny}")
         
         # Calculate size distributions
         print("\nCalculating size distributions...")
         self.size_distributions = {}
-        for cat in [0, 1, 2]:
+        for cat in [0, 1, 2, 3]:
             dist = get_size_distribution_fractions(
                 cat, self.bin_diameters, self.subrange_labels, 
                 self.nf2a, self.has_2a, self.has_2b
             )
             self.size_distributions[cat] = dist
-            print(f"  {SIZE_DISTRIBUTIONS[cat]['name']}: sum={np.sum(dist):.6f}")
-        
-        if self.has_2a and self.has_2b:
-            print(f"\nSpecies-specific 2a fractions:")
-            for spec in self.composition_name_list:
-                if spec in SPECIES_2A_FRACTION:
-                    f = SPECIES_2A_FRACTION[spec]
-                    print(f"  {spec:<6}: {f*100:.0f}% to 2a, {(1-f)*100:.0f}% to 2b")
         
         print(f"\nCreating output file: {output_file}")
         self.nc_file = Dataset(output_file, "w", format="NETCDF4")
@@ -706,6 +767,7 @@ class SalsaDriver:
         self.finalize()
     
     def write_global_attributes(self):
+        """Write global attributes"""
         print("\nWriting global attributes...")
         for attr in self.static_nc.ncattrs():
             try:
@@ -713,27 +775,24 @@ class SalsaDriver:
             except:
                 pass
         
-        self.nc_file.creation_date = str(datetime.datetime.now())
+        self.nc_file.creation_date = str(datetime.now())
         self.nc_file.description = (
-            f"Aerosol input (SALSA driver) for PALM. "
-            f"nbin={self.nbin}, reglim={self.reglim}, nf2a={self.nf2a}. "
-            f"Total bins={self.nbins_total}."
+            f"Aerosol input (SALSA driver) for PALM - 4 categories. "
+            f"Period: {START_DATE} to {END_DATE}. "
+            f"nbin={self.nbin}, nf2a={self.nf2a}, bins={self.nbins_total}"
         )
-        self.nc_file.title = "PALM input file for SALSA aerosol module"
+        self.nc_file.title = "PALM SALSA aerosol input"
         self.nc_file.institution = "University of Augsburg"
         self.nc_file.author = "Sathish Kumar Vaithiyanadhan"
-        self.nc_file.palm_version = "6.0"
+        self.nc_file.emission_start = START_DATE
+        self.nc_file.emission_end = END_DATE
         self.nc_file.composition_name = ', '.join(self.composition_name_list)
         self.nc_file.nbin = f"{self.nbin[0]}, {self.nbin[1]}"
-        self.nc_file.reglim = f"{self.reglim[0]:.2e}, {self.reglim[1]:.2e}, {self.reglim[2]:.2e}"
         self.nc_file.nf2a = f"{self.nf2a}"
         self.nc_file.total_bins = f"{self.nbins_total}"
-        self.nc_file.nbin1 = f"{self.nbin1}"
-        self.nc_file.nbin2 = f"{self.nbin2}"
-        self.nc_file.has_2a = f"{self.has_2a}"
-        self.nc_file.has_2b = f"{self.has_2b}"
 
     def define_dimensions(self):
+        """Define NetCDF dimensions"""
         print("Defining dimensions...")
         self.nncat = len(self.selected_cat_indices)
         self.ncomposition_index = len(self.composition_name_list)
@@ -745,46 +804,45 @@ class SalsaDriver:
         self.nc_file.createDimension("ncat", self.nncat)
         self.nc_file.createDimension("composition_index", self.ncomposition_index)
         self.nc_file.createDimension("max_string_length", self.nmax_string_length)
-        self.nc_file.createDimension("Dmid", self.nbins_total)  # DYNAMIC!
+        self.nc_file.createDimension("Dmid", self.nbins_total)
 
         x = self.nc_file.createVariable("x", "f4", ("x",))
-        x[:] = self.static_x
-        x.units = "m"
+        x[:] = self.static_x; x.units = "m"
 
         y = self.nc_file.createVariable("y", "f4", ("y",))
-        y[:] = self.static_y
-        y.units = "m"
+        y[:] = self.static_y; y.units = "m"
 
+        #t = self.nc_file.createVariable("time", "f4", ("time",))
+        #t[:] = np.arange(0, self.ntime * 3600, 3600); t.units = "s"
         t = self.nc_file.createVariable("time", "f4", ("time",))
-        t[:] = np.arange(0, 24 * 3600, 3600)
+        t[:] = np.arange(1, self.ntime + 1) * 3600  # Start from 3600 (1 hour), not 0
         t.units = "s"
 
         Dmid = self.nc_file.createVariable("Dmid", "f4", ("Dmid",))
-        Dmid[:] = self.bin_diameters
-        Dmid.units = "m"
-        Dmid.long_name = "geometric mean diameter of aerosol size bin"
+        Dmid[:] = self.bin_diameters; Dmid.units = "m"
         
         Dlow = self.nc_file.createVariable("Dlow", "f4", ("Dmid",))
-        Dlow[:] = self.bin_low
-        Dlow.units = "m"
+        Dlow[:] = self.bin_low; Dlow.units = "m"
         
         Dhigh = self.nc_file.createVariable("Dhigh", "f4", ("Dmid",))
-        Dhigh[:] = self.bin_high
-        Dhigh.units = "m"
+        Dhigh[:] = self.bin_high; Dhigh.units = "m"
 
         ncat_coord = self.nc_file.createVariable("ncat", "i4", ("ncat",))
         ncat_coord[:] = np.arange(1, self.nncat + 1)
         
-        comp_index = self.nc_file.createVariable("composition_index", "i4", ("composition_index",))
+        comp_index = self.nc_file.createVariable("composition_index", "i4", 
+                                                  ("composition_index",))
         comp_index[:] = np.arange(1, self.ncomposition_index + 1)
         
-        max_str = self.nc_file.createVariable("max_string_length", "i4", ("max_string_length",))
+        max_str = self.nc_file.createVariable("max_string_length", "i4", 
+                                               ("max_string_length",))
         max_str[:] = np.arange(1, self.nmax_string_length + 1)
 
     def add_variables(self):
+        """Add emission variables"""
         print("\nAdding emission variables...")
 
-        all_cat_names = ["traffic exhaust", "road dust", "wood combustion"]
+        all_cat_names = ["traffic exhaust", "road dust", "wood combustion", "other"]
         filtered_names = [all_cat_names[i] for i in self.selected_cat_indices]
         
         nc_cat_name = self.nc_file.createVariable("emission_category_name", "S1", 
@@ -802,10 +860,12 @@ class SalsaDriver:
             chars = list(name.ljust(self.nmax_string_length))
             nc_comp_name[i, :] = np.array(list(chars), dtype="S1")
 
+        # Mass fractions
         emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index))
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             for comp_idx, comp_name in enumerate(self.composition_name_list):
-                emission_mass_fracs[new_cat_idx, comp_idx] = CATEGORY_COMPOSITION[old_cat_idx].get(comp_name, 0.0)
+                emission_mass_fracs[new_cat_idx, comp_idx] = \
+                    CATEGORY_COMPOSITION[old_cat_idx].get(comp_name, 0.0)
         
         for cat in range(self.nncat):
             total = np.sum(emission_mass_fracs[cat, :])
@@ -813,29 +873,33 @@ class SalsaDriver:
                 emission_mass_fracs[cat, :] /= total
         
         nc_mass_fracs = self.nc_file.createVariable("emission_mass_fracs", "f4", 
-                                                     ("ncat", "composition_index"), fill_value=-9999.0)
-        nc_mass_fracs[:] = emission_mass_fracs
-        nc_mass_fracs.units = "1"
+                                                     ("ncat", "composition_index"), 
+                                                     fill_value=-9999.0)
+        nc_mass_fracs[:] = emission_mass_fracs; nc_mass_fracs.units = "1"
 
+        # Number fractions
         emission_num_fracs = np.zeros((self.nncat, self.nbins_total))
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             emission_num_fracs[new_cat_idx, :] = self.size_distributions[old_cat_idx]
         
         nc_num_fracs = self.nc_file.createVariable("emission_number_fracs", "f4", 
-                                                    ("ncat", "Dmid"), fill_value=-9999.0)
-        nc_num_fracs[:] = emission_num_fracs
-        nc_num_fracs.units = "1"
+                                                    ("ncat", "Dmid"), 
+                                                    fill_value=-9999.0)
+        nc_num_fracs[:] = emission_num_fracs; nc_num_fracs.units = "1"
 
+        # Emission values
         nc_aerosol = self.nc_file.createVariable("aerosol_emission_values", "f4",
-                                                  ("time", "y", "x", "ncat"), fill_value=-9999.0)
-        nc_aerosol.units = "#/m2/s"
-        nc_aerosol.lod = 2
+                                                  ("time", "y", "x", "ncat"), 
+                                                  fill_value=-9999.0)
+        nc_aerosol.units = "#/m2/s"; nc_aerosol.lod = 2
 
         self.generate_emission_data(nc_aerosol)
 
     def generate_emission_data(self, nc_var):
+        """Generate emission data"""
         print("\n" + "=" * 70)
         print("PROCESSING EMISSION TIFF FILES")
+        print(f"Date range: {self.start_dt} to {self.end_dt}")
         print("=" * 70)
         
         tiff_patterns = [os.path.join(self.tiff_dir, "emission_*_temporal.tif")]
@@ -844,10 +908,9 @@ class SalsaDriver:
             files = glob.glob(pattern)
             if files:
                 tiff_files.extend(files)
-                print(f"Found {len(files)} files")
         
         tiff_files = list(set(tiff_files))
-        print(f"\nTotal TIFF files: {len(tiff_files)}")
+        print(f"\nFound {len(tiff_files)} unique TIFF files")
         
         if len(tiff_files) == 0:
             print("WARNING: No TIFF files found!")
@@ -855,20 +918,20 @@ class SalsaDriver:
             return
         
         processor = TiffProcessor(
-            self.static_params, self.static_crs, self.active_categories,
-            self.nx, self.ny, self.ntime,
-            self.bin_diameters, self.bin_low, self.bin_high, self.subrange_labels,
-            self.size_distributions, self.nf2a, self.has_2a, self.has_2b, self.nbins_total
+            self.static_params, self.nx, self.ny, self.ntime,
+            self.bin_diameters, self.subrange_labels,
+            self.size_distributions, self.nf2a, self.has_2a, self.has_2b, 
+            self.nbins_total, self.start_dt, self.end_dt, self.time_steps
         )
         
         num_processes = max(1, min(cpu_count(), len(tiff_files)))
-        print(f"\nUsing {num_processes} processes")
+        print(f"Using {num_processes} processes")
         
-        category_accumulators = {
-            0: np.zeros((self.ntime, self.ny, self.nx, self.nbins_total)),
-            1: np.zeros((self.ntime, self.ny, self.nx, self.nbins_total)),
-            2: np.zeros((self.ntime, self.ny, self.nx, self.nbins_total))
-        }
+        # Initialize accumulators
+        category_accumulators = {}
+        for cat in [0, 1, 2, 3]:
+            category_accumulators[cat] = np.zeros((self.ntime, self.ny, self.nx, self.nbins_total), 
+                                                  dtype=np.float32)
         
         processed_files = 0
         with Pool(processes=num_processes) as pool:
@@ -883,29 +946,48 @@ class SalsaDriver:
         
         print(f"\nProcessed {processed_files} files")
         
-        aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat))
+        # Create output
+        aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat), 
+                                           dtype=np.float32)
+        
+        print(f"\nEmission totals:")
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
-            aerosol_emission_values[:, :, :, new_cat_idx] = np.sum(category_accumulators[old_cat_idx], axis=3)
+            aerosol_emission_values[:, :, :, new_cat_idx] = np.sum(
+                category_accumulators[old_cat_idx], axis=3)
+            
             total = np.sum(aerosol_emission_values[:, :, :, new_cat_idx])
-            print(f"  {self.selected_cat_names[new_cat_idx]}: {total:.2e} #/s")
+            print(f"  {self.selected_cat_names[new_cat_idx]:<20}: {total:.2e} #/s")
         
         nc_var[:] = aerosol_emission_values
+        
+        # Clear cache
+        clear_geotiff_cache()
 
     def validate_emissions(self):
+        """Validate emission values"""
         print("\n" + "=" * 70)
         print("VALIDATION")
         print("=" * 70)
+        
         with Dataset(self.output_file, "r") as nc:
             emissions = nc.variables["aerosol_emission_values"][:]
+            mass_fracs = nc.variables["emission_mass_fracs"][:]
+            num_fracs = nc.variables["emission_number_fracs"][:]
+            
             print(f"  Shape: {emissions.shape}")
-            print(f"  Total emissions: {np.sum(emissions):.2e} #/s")
-            print(f"  Dmid dimension: {nc.dimensions['Dmid'].size} bins")
+            print(f"\n  Mass fraction sums:")
+            for cat in range(self.nncat):
+                print(f"    {self.selected_cat_names[cat]:<20}: {np.sum(mass_fracs[cat, :]):.6f}")
+            print(f"\n  Number fraction sums:")
+            for cat in range(self.nncat):
+                print(f"    {self.selected_cat_names[cat]:<20}: {np.sum(num_fracs[cat, :]):.6f}")
 
     def finalize(self):
+        """Close files"""
         print("\nFinalizing...")
         self.static_nc.close()
         self.nc_file.close()
-        print(f"Successfully created: {self.output_file}")
+        print(f"Created: {self.output_file}")
 
 
 # =============================================================================
@@ -915,24 +997,18 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    # MODIFY THESE PATHS
-    static_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/INPUT/smallegu_static"
+    static_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/allconstant/INPUT/allconstant_static"
     tiff_dir = "/home/vaithisa/Downscale_Emissions_simple/downscale/"
-    output_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/smallegu_salsa"
-    
-    active_categories = ['A_PublicPower', 'B_Industry', 'C_OtherStationaryComb',
-                         'D_Fugitives', 'E_Solvents', 'F_RoadTransport',
-                         'G_Shipping', 'H_Aviation', 'I_OffRoad', 'J_Waste',
-                         'K_AgriLivestock', 'L_AgriOther']
+    output_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/allconstant/INPUT/allconstant_salsa"
     
     print("\n" + "=" * 70)
-    print("STARTING PALM-SALSA DRIVER - DYNAMIC BIN VERSION")
+    print("STARTING PALM-SALSA DRIVER GENERATION")
     print("=" * 70)
-    print(f"nbin = {NBIN}  ← CHANGE THIS FOR DIFFERENT BIN COUNTS!")
-    print(f"reglim = {REGLIM}")
-    print(f"nf2a = {NF2A}")
+    print(f"Date: {START_DATE} to {END_DATE}")
+    print(f"Categories: {ACTIVE_OUTPUT_CATEGORIES}")
+    print(f"Start: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    driver = SalsaDriver(static_file, tiff_dir, output_file, active_categories)
+    driver = SalsaDriver(static_file, tiff_dir, output_file)
     
     total_time = time.time() - total_start
     print("\n" + "=" * 70)
