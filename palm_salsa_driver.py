@@ -155,7 +155,7 @@ CATEGORY_COMPOSITION = {
 
 SPECIES_CATEGORY_MAPPING = {
     "oc": {"target": "OC"}, "bc": {"target": "BC"}, "ec": {"target": "BC"},
-    "so2": {"target": "H2SO4"}, "no": {"target": "HNO3"}, "no2": {"target": "HNO3"},
+    "so4": {"target": "H2SO4"}, "no": {"target": "HNO3"}, "no2": {"target": "HNO3"},
     "nh3": {"target": "NH3"}, "othmin": {"target": "DU"},
     "pb": {"target": "PB"}, "hg": {"target": "HG"}, "ni": {"target": "NI"},
     "cd": {"target": "CD"}, "as": {"target": "AS"}, "na": {"target": "SS"},
@@ -746,6 +746,12 @@ class SalsaDriver:
         self.static_y = self.static_nc.variables["y"][:]
         
         print(f"Domain: {self.nx} x {self.ny}")
+
+        # Print all bins
+        print(f"\nBin details ({self.nbins_total} bins):")
+        for i, (d, label) in enumerate(zip(self.bin_diameters, self.subrange_labels)):
+            print(f"  Bin {i+1:2d} [{label}]: {d*1e9:.1f} nm "
+                  f"[{self.bin_low[i]*1e9:.1f}-{self.bin_high[i]*1e9:.1f}] nm")
         
         # Calculate size distributions
         print("\nCalculating size distributions...")
@@ -812,11 +818,11 @@ class SalsaDriver:
         y = self.nc_file.createVariable("y", "f4", ("y",))
         y[:] = self.static_y; y.units = "m"
 
-        #t = self.nc_file.createVariable("time", "f4", ("time",))
-        #t[:] = np.arange(0, self.ntime * 3600, 3600); t.units = "s"
         t = self.nc_file.createVariable("time", "f4", ("time",))
-        t[:] = np.arange(1, self.ntime + 1) * 3600  # Start from 3600 (1 hour), not 0
-        t.units = "s"
+        t[:] = np.arange(0, self.ntime * 3600, 3600); t.units = "s"
+        #t = self.nc_file.createVariable("time", "f4", ("time",))
+        #t[:] = np.arange(1, self.ntime + 1) * 3600  # Start from 3600 (1 hour), not 0
+        #t.units = "s"
 
         Dmid = self.nc_file.createVariable("Dmid", "f4", ("Dmid",))
         Dmid[:] = self.bin_diameters; Dmid.units = "m"
@@ -860,32 +866,54 @@ class SalsaDriver:
             chars = list(name.ljust(self.nmax_string_length))
             nc_comp_name[i, :] = np.array(list(chars), dtype="S1")
 
-        # Mass fractions
-        emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index))
+        # Mass fractions with exact normalization to sum=1
+        emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index), dtype=np.float64)
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             for comp_idx, comp_name in enumerate(self.composition_name_list):
                 emission_mass_fracs[new_cat_idx, comp_idx] = \
                     CATEGORY_COMPOSITION[old_cat_idx].get(comp_name, 0.0)
-        
-        for cat in range(self.nncat):
-            total = np.sum(emission_mass_fracs[cat, :])
-            if total > 0 and abs(total - 1.0) > 1e-6:
-                emission_mass_fracs[cat, :] /= total
-        
-        nc_mass_fracs = self.nc_file.createVariable("emission_mass_fracs", "f4", 
-                                                     ("ncat", "composition_index"), 
-                                                     fill_value=-9999.0)
-        nc_mass_fracs[:] = emission_mass_fracs; nc_mass_fracs.units = "1"
+            
+            # Exact normalization using np.float64 for maximum precision
+            total = np.sum(emission_mass_fracs[new_cat_idx, :], dtype=np.float64)
+            if total > 0:
+                # Normalize and then correct the last element to ensure exact sum=1
+                emission_mass_fracs[new_cat_idx, :] = (emission_mass_fracs[new_cat_idx, :] / total).astype(np.float64)
+                
+                # Force exact sum to 1 by adjusting the last non-zero element
+                sum_after_norm = np.sum(emission_mass_fracs[new_cat_idx, :], dtype=np.float64)
+                if abs(sum_after_norm - 1.0) > 1e-15:
+                    # Find last non-zero element to adjust
+                    for idx in range(self.ncomposition_index - 1, -1, -1):
+                        if emission_mass_fracs[new_cat_idx, idx] > 0:
+                            emission_mass_fracs[new_cat_idx, idx] += (1.0 - sum_after_norm)
+                            break
 
-        # Number fractions
-        emission_num_fracs = np.zeros((self.nncat, self.nbins_total))
+        # Number fractions with exact normalization to sum=1
+        emission_num_fracs = np.zeros((self.nncat, self.nbins_total), dtype=np.float64)
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             emission_num_fracs[new_cat_idx, :] = self.size_distributions[old_cat_idx]
-        
+            
+            # Ensure exact sum to 1 using the last bin adjustment
+            total = np.sum(emission_num_fracs[new_cat_idx, :], dtype=np.float64)
+            if abs(total - 1.0) > 1e-15:
+                # Adjust the last bin to make sum exactly 1
+                emission_num_fracs[new_cat_idx, -1] += (1.0 - total)
+                # Re-normalize if adjustment causes negative values
+                if emission_num_fracs[new_cat_idx, -1] < 0:
+                    emission_num_fracs[new_cat_idx, :] /= total
+
+        # Convert to float32 for NetCDF storage (but maintain exact sum)
+        nc_mass_fracs = self.nc_file.createVariable("emission_mass_fracs", "f4", 
+                                                    ("ncat", "composition_index"), 
+                                                    fill_value=-9999.0)
+        nc_mass_fracs[:] = emission_mass_fracs.astype(np.float32)
+        nc_mass_fracs.units = "1"
+
         nc_num_fracs = self.nc_file.createVariable("emission_number_fracs", "f4", 
                                                     ("ncat", "Dmid"), 
                                                     fill_value=-9999.0)
-        nc_num_fracs[:] = emission_num_fracs; nc_num_fracs.units = "1"
+        nc_num_fracs[:] = emission_num_fracs.astype(np.float32)
+        nc_num_fracs.units = "1"
 
         # Emission values
         nc_aerosol = self.nc_file.createVariable("aerosol_emission_values", "f4",
@@ -997,9 +1025,9 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    static_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/allconstant/INPUT/allconstant_static"
+    static_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/INPUT/smallegu_static"
     tiff_dir = "/home/vaithisa/Downscale_Emissions_simple/downscale/"
-    output_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/allconstant/INPUT/allconstant_salsa"
+    output_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/INPUT/smallegu_salsa"
     
     print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
