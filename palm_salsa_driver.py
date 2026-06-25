@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 
 # ---- Date/Time Range for Emissions ----
-START_DATE = "2024-08-25 00:00:00"
+START_DATE = "2024-08-24 22:00:00"
 END_DATE   = "2024-08-25 23:00:00"
 
 # ---- Emission Categories to Include ----
@@ -98,7 +98,7 @@ def get_category_from_band(band_name):
 
 NBIN = [3, 7]
 REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
-NF2A = 0.75
+NF2A = 1.0 #0.75
 
 # Species properties for mass → number conversion
 species_properties = {
@@ -677,6 +677,244 @@ class TiffProcessor:
 
 
 # =============================================================================
+# MULTIPROCESSING WORKER: Module-level functions (pickle-safe)
+# =============================================================================
+
+_WORKER_PARAMS = None
+
+def _init_worker(static_params, nx, ny, ntime, bin_diameters, subrange_labels,
+                  size_distributions, nf2a, has_2a, has_2b, nbins_total,
+                  start_dt, end_dt, time_steps, time_index_lookup):
+    """Initialize per-process worker data (runs once per worker).
+    
+    Stores all shared read-only data as module-level globals so that
+    the worker function _process_tiff_file_wrapper can access them
+    without pickling a TiffProcessor instance.
+    """
+    global _WORKER_PARAMS
+    import numpy as np
+    from osgeo import gdal
+    
+    # Build a TiffProcessor-like state dict
+    _WORKER_PARAMS = {
+        'static_params': static_params,
+        'nx': nx, 'ny': ny, 'ntime': ntime,
+        'bin_diameters': bin_diameters,
+        'subrange_labels': subrange_labels,
+        'size_distributions': size_distributions,
+        'nf2a': nf2a, 'has_2a': has_2a, 'has_2b': has_2b,
+        'nbins_total': nbins_total,
+        'start_dt': start_dt, 'end_dt': end_dt,
+        'time_steps': time_steps,
+        'time_index_lookup': time_index_lookup,
+    }
+    
+    # Pre-compute bin volumes and conversion factor for this worker
+    _WORKER_PARAMS['bin_volumes'] = np.array([
+        (4.0/3.0) * np.pi * (d/2.0)**3 for d in bin_diameters
+    ], dtype=np.float32)
+    _WORKER_PARAMS['conv_factor'] = np.float32(1.0 / (365.25 * 24 * 3600))
+    
+    # Per-worker local cache (module-level, private to this process)
+    _WORKER_PARAMS['_geotiff_cache'] = {}
+    _WORKER_PARAMS['_cache_order'] = []
+    _WORKER_PARAMS['_MAX_CACHE_SIZE'] = 3
+
+
+def _process_tiff_file_wrapper(tiff_file):
+    """Module-level wrapper for processing a single TIFF file.
+    
+    This is a standalone function so multiprocessing.Pool can pickle it
+    without serializing a TiffProcessor instance.  Uses _WORKER_PARAMS
+    that was set by _init_worker in each worker process.
+    """
+    import os
+    import numpy as np
+    from osgeo import gdal
+    
+    p = _WORKER_PARAMS
+    cache = p['_geotiff_cache']
+    cache_order = p['_cache_order']
+    max_cache = p['_MAX_CACHE_SIZE']
+    
+    filename = os.path.basename(tiff_file).lower()
+    
+    try:
+        # --- identical logic to TiffProcessor.process_single_file ---
+        
+        # Skip bulk species
+        if any(bulk in filename for bulk in BULK_SPECIES):
+            return None
+        
+        # Find matching species
+        species = None
+        for key in SPECIES_CATEGORY_MAPPING.keys():
+            if key in filename:
+                species = key
+                break
+        if species is None:
+            return None
+        
+        mapping = SPECIES_CATEGORY_MAPPING.get(species)
+        if not mapping:
+            return None
+        
+        target_species = mapping["target"]
+        
+        # Get band info (open file, parse bands within date range)
+        ds = gdal.Open(tiff_file, gdal.GA_ReadOnly)
+        if not ds:
+            return None
+        
+        band_info = {}
+        total_bands = ds.RasterCount
+        for band_num in range(1, total_bands + 1):
+            band = ds.GetRasterBand(band_num)
+            desc = band.GetDescription()
+            if desc:
+                parsed = parse_band_description(desc)
+                if parsed is not None:
+                    sector, hour, date_str, band_dt = parsed
+                    if p['start_dt'] <= band_dt <= p['end_dt']:
+                        time_key = (date_str, hour)
+                        time_idx = p['time_index_lookup'].get(time_key)
+                        if time_idx is not None:
+                            categories = get_category_from_band(desc)
+                            if time_idx not in band_info:
+                                band_info[time_idx] = []
+                            band_info[time_idx].append({
+                                'band_num': band_num,
+                                'categories': categories
+                            })
+        ds = None
+        
+        if not band_info:
+            print(f"\n  Skipping {filename}: No bands in date range")
+            return None
+        
+        total_bands_to_process = sum(len(bands) for bands in band_info.values())
+        print(f"\n{'─'*60}")
+        print(f"File: {filename}")
+        print(f"  Species: {species} \u2192 {target_species}")
+        print(f"  Bands to process: {total_bands_to_process} (across {len(band_info)} time steps)")
+        
+        # Only allocate categories that actually appear in this file's bands
+        # (saves ~750 MB per worker by avoiding 3 unused 260 MB arrays)
+        needed_categories = set()
+        for bands_list in band_info.values():
+            for entry in bands_list:
+                for cat in entry['categories']:
+                    needed_categories.add(cat)
+        category_emissions = {}
+        for cat in needed_categories:
+            category_emissions[cat] = np.zeros(
+                (p['ntime'], p['ny'], p['nx'], p['nbins_total']), dtype=np.float32
+            )
+        
+        f_2a = SPECIES_2A_FRACTION.get(target_species, 0.5)
+        
+        # --- Resample GeoTIFF (per-worker local cache) ---
+        if tiff_file in cache:
+            cache_order.remove(tiff_file)
+            cache_order.insert(0, tiff_file)
+            all_bands_data = cache[tiff_file]
+        else:
+            if not os.path.exists(tiff_file):
+                raise FileNotFoundError(f"GeoTIFF file not found: {tiff_file}")
+            print(f"  Resampling: {os.path.basename(tiff_file)}")
+            warp_options = gdal.WarpOptions(
+                format='MEM',
+                outputBounds=[p['static_params']['west'], p['static_params']['south'],
+                              p['static_params']['east'], p['static_params']['north']],
+                width=p['static_params']['nx'],
+                height=p['static_params']['ny'],
+                dstSRS=CONFIG_PROJ,
+                resampleAlg=gdal.GRA_NearestNeighbour
+            )
+            resampled_ds = gdal.Warp('', tiff_file, options=warp_options)
+            if resampled_ds is None:
+                raise RuntimeError(f"Failed to resample GeoTIFF: {tiff_file}")
+            num_bands = resampled_ds.RasterCount
+            all_bands_data = []
+            for bnum in range(1, num_bands + 1):
+                arr = resampled_ds.GetRasterBand(bnum).ReadAsArray().astype(np.float32)
+                arr = np.flipud(arr)
+                all_bands_data.append(arr)
+            resampled_ds = None
+            
+            # LRU cache per worker
+            if len(cache_order) >= max_cache:
+                oldest = cache_order.pop()
+                del cache[oldest]
+            cache[tiff_file] = all_bands_data
+            cache_order.insert(0, tiff_file)
+        
+        # --- Process bands (logic identical to original) ---
+        bands_processed = 0
+        for time_idx, bands in band_info.items():
+            if time_idx >= p['ntime']:
+                continue
+            for band_entry in bands:
+                band_num = band_entry['band_num']
+                categories = band_entry['categories']
+                
+                if band_num - 1 < len(all_bands_data):
+                    mass_data = all_bands_data[band_num - 1]
+                else:
+                    continue
+                if np.all(mass_data == 0):
+                    continue
+                
+                mass_data = mass_data * p['conv_factor']
+                bands_processed += 1
+                
+                for cat in categories:
+                    mass_frac = CATEGORY_COMPOSITION[cat].get(target_species, 0.0)
+                    if mass_frac <= 0:
+                        continue
+                    
+                    size_fracs = p['size_distributions'][cat]
+                    species_mass = mass_data * mass_frac
+                    
+                    adjusted_fracs = size_fracs.copy()
+                    if p['has_2a'] and p['has_2b']:
+                        mask_2a = p['subrange_labels'] == '2a'
+                        mask_2b = p['subrange_labels'] == '2b'
+                        adjusted_fracs[mask_2a] *= f_2a
+                        adjusted_fracs[mask_2b] *= (1.0 - f_2a)
+                    
+                    for bin_idx in range(p['nbins_total']):
+                        if adjusted_fracs[bin_idx] <= 0:
+                            continue
+                        bin_mass = species_mass * adjusted_fracs[bin_idx]
+                        particle_mass = species_properties[target_species]["rho"] * p['bin_volumes'][bin_idx]
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            number_flux = np.where(
+                                (particle_mass > 0) & (bin_mass > 0),
+                                bin_mass / particle_mass, 0.0
+                            )
+                        category_emissions[cat][time_idx, :, :, bin_idx] += number_flux
+        
+        print(f"  Processed: {bands_processed} bands")
+        
+        if bands_processed == 0:
+            return None
+        
+        # Build result dict (only categories that were allocated)
+        results = {}
+        for cat, cat_data in category_emissions.items():
+            if np.any(cat_data > 0):
+                results[f"cat_{cat}"] = cat_data
+        results['species'] = species
+        results['target'] = target_species
+        return results
+    
+    except Exception as e:
+        print(f"\n  ERROR processing {filename}: {e}")
+        return None
+
+
+# =============================================================================
 # MAIN SALSA DRIVER CLASS
 # =============================================================================
 
@@ -945,15 +1183,22 @@ class SalsaDriver:
             nc_var[:] = np.zeros((self.ntime, self.ny, self.nx, self.nncat))
             return
         
-        processor = TiffProcessor(
-            self.static_params, self.nx, self.ny, self.ntime,
-            self.bin_diameters, self.subrange_labels,
-            self.size_distributions, self.nf2a, self.has_2a, self.has_2b, 
-            self.nbins_total, self.start_dt, self.end_dt, self.time_steps
-        )
+        # Cap workers to prevent OOM: each worker allocates ~1 GB for a 512×512×26×10 grid
+        # (4 category arrays × 260 MB each + resampled GeoTIFF data).
+        # With too many parallel workers, the system runs out of memory and kills the process.
+        num_cpus = cpu_count()
+        # Safe limit: each file result returned can be ~260 MB (one non-zero category);
+        # use at most 4 workers to keep peak memory under ~5 GB
+        max_safe_workers = min(4, num_cpus)
+        num_processes = max(1, min(max_safe_workers, len(tiff_files)))
+        print(f"Using {num_processes} process{'es' if num_processes > 1 else ''}" +
+              (f" (capped from {num_cpus} to prevent OOM)" if num_processes < num_cpus else ""))
         
-        num_processes = max(1, min(cpu_count(), len(tiff_files)))
-        print(f"Using {num_processes} processes")
+        # Pre-compute time index lookup for workers
+        time_index_lookup = {}
+        for idx, ts in enumerate(self.time_steps):
+            key = (ts['date'], ts['hour'])
+            time_index_lookup[key] = idx
         
         # Initialize accumulators
         category_accumulators = {}
@@ -962,17 +1207,35 @@ class SalsaDriver:
                                                   dtype=np.float32)
         
         processed_files = 0
-        with Pool(processes=num_processes) as pool:
-            results = pool.map(processor.process_single_file, tiff_files)
-            for result in results:
+        failed_files = 0
+        
+        with Pool(
+            processes=num_processes,
+            initializer=_init_worker,
+            initargs=(
+                self.static_params, self.nx, self.ny, self.ntime,
+                self.bin_diameters, self.subrange_labels,
+                self.size_distributions, self.nf2a, self.has_2a, self.has_2b,
+                self.nbins_total, self.start_dt, self.end_dt,
+                self.time_steps, time_index_lookup,
+            ),
+            # Restart worker after each file to free ~1 GB of accumulators + cached
+            # resampled data.  Without this, memory accumulates across files.
+            maxtasksperchild=1,
+        ) as pool:
+            # Use imap_unordered for streaming progress; each file is independent
+            for result in pool.imap_unordered(_process_tiff_file_wrapper, tiff_files):
                 if result is not None:
                     processed_files += 1
                     for cat_key, cat_data in result.items():
                         if cat_key.startswith('cat_'):
                             cat_idx = int(cat_key.split('_')[1])
                             category_accumulators[cat_idx] += cat_data
+                else:
+                    failed_files += 1
         
-        print(f"\nProcessed {processed_files} files")
+        print(f"\nProcessed {processed_files} files successfully" +
+              (f", {failed_files} failed" if failed_files else ""))
         
         # Create output
         aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat), 
@@ -1025,9 +1288,9 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    static_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/INPUT/smallegu_static"
-    tiff_dir = "/home/vaithisa/Downscale_Emissions_simple/downscale/"
-    output_file = "/home/vaithisa/palm_model_system-v25.10/JOBS/smallegu/INPUT/smallegu_salsa"
+    static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augs_Bourges_Platz/OUTPUT/nesting_test_static_N02"
+    tiff_dir = "/mnt/t/PhD_data/downscale/Downscale_8m_3days/"  #"/mnt/t/PhD_data/downscale/UA_CLC_100m_3days/" #"/home/vaithisa/Downscale_Emissions_simple/downscale/" #"/mnt/d/downscaled_emissions/UA_CLC_100m_3days/"
+    output_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augs_Bourges_Platz/OUTPUT/nesting_test_salsa_N02"
     
     print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
