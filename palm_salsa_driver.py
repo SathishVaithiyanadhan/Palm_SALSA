@@ -35,8 +35,8 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 
 # ---- Date/Time Range for Emissions ----
-START_DATE = "2024-08-25 00:00:00"
-END_DATE   = "2024-08-25 23:00:00"
+START_DATE = "2026-03-06 21:00:00"
+END_DATE   = "2026-03-09 23:00:00"
 
 # ---- Emission Categories to Include ----
 ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood', 'other']
@@ -48,8 +48,8 @@ ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood', 'other']
 
 # ---- Species Selection ----
 SPECIES_OUTPUT_MODE = "custom"
-CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
-#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "HNO3", "NH3"]
+#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
+CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "HNO3", "NH3"]
 #CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS"]
 # Select species for output file
 # Option 1: Original 7 species
@@ -99,7 +99,7 @@ def get_category_from_band(band_name):
 
 NBIN = [3, 7]
 REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
-NF2A = 0.55
+NF2A = 0.75
 
 # Species properties for mass -> number conversion
 # DENSITIES must match PALM SALSA internal values (salsa_mod.f90 lines 212-219):
@@ -1130,9 +1130,9 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    static_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_static"
-    tiff_dir = "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/Downscale_10m_3days/" 
-    output_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_salsa"
+    static_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/WRF_paper128_nf2a/INPUT/WRF_paper128_nf2a_static"
+    tiff_dir = "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/downscale_wrfpaper_2026/" 
+    output_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/WRF_paper128_nf2a/INPUT/WRF_paper128_nf2a_salsa"
     
     print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
