@@ -35,7 +35,7 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 
 # ---- Date/Time Range for Emissions ----
-START_DATE = "2024-08-24 22:00:00"
+START_DATE = "2024-08-25 00:00:00"
 END_DATE   = "2024-08-25 23:00:00"
 
 # ---- Emission Categories to Include ----
@@ -50,6 +50,7 @@ ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood', 'other']
 SPECIES_OUTPUT_MODE = "custom"
 CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
 #CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "HNO3", "NH3"]
+#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS"]
 # Select species for output file
 # Option 1: Original 7 species
 # SPECIES_OUTPUT_MODE = "basic7"
@@ -98,17 +99,20 @@ def get_category_from_band(band_name):
 
 NBIN = [3, 7]
 REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
-NF2A = 1.0 #0.75
+NF2A = 0.55
 
-# Species properties for mass → number conversion
+# Species properties for mass -> number conversion
+# DENSITIES must match PALM SALSA internal values (salsa_mod.f90 lines 212-219):
+#   arhooc=2000, arhobc=2000, arhodu=2650, arhoh2so4=1830,
+#   arhoss=2165, arhohno3=1479, arhonh3=1530
 species_properties = {
-    "H2SO4": {"rho": 1840, "name": "Sulfuric acid", "molar_mass": 0.098},
-    "OC":    {"rho": 1500, "name": "Organic carbon", "molar_mass": 0.012},
-    "BC":    {"rho": 1800, "name": "Black carbon", "molar_mass": 0.012},
+    "H2SO4": {"rho": 1830, "name": "Sulfuric acid", "molar_mass": 0.098},
+    "OC":    {"rho": 2000, "name": "Organic carbon", "molar_mass": 0.012},
+    "BC":    {"rho": 2000, "name": "Black carbon", "molar_mass": 0.012},
     "DU":    {"rho": 2650, "name": "Mineral dust", "molar_mass": 0.060},
-    "SS":    {"rho": 2200, "name": "Sea salt", "molar_mass": 0.058},
-    "HNO3":  {"rho": 1500, "name": "Nitric acid", "molar_mass": 0.063},
-    "NH3":   {"rho": 1700, "name": "Ammonia", "molar_mass": 0.017},
+    "SS":    {"rho": 2165, "name": "Sea salt", "molar_mass": 0.058},
+    "HNO3":  {"rho": 1479, "name": "Nitric acid", "molar_mass": 0.063},
+    "NH3":   {"rho": 1530, "name": "Ammonia", "molar_mass": 0.017},
     "PB":    {"rho": 11340, "name": "Lead", "molar_mass": 0.2072},
     "HG":    {"rho": 13534, "name": "Mercury", "molar_mass": 0.20059},
     "NI":    {"rho": 8908, "name": "Nickel", "molar_mass": 0.058693},
@@ -123,38 +127,73 @@ SPECIES_2A_FRACTION = {
 }
 
 SIZE_DISTRIBUTIONS = {
-    0: {"name": "traffic exhaust", "modes": [
-            {"Dg": 13.5e-9, "sigma": 1.6, "weight": 0.016},
-            {"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.984}],
+    # ── Traffic exhaust ──────────────────────────────────────
+    #   OC, BC:          ultrafine/accumulation from tailpipe
+    #   DU:              coarse from road abrasion, tire wear
+    #   SS:              fine (salt from de-icing / humidity)
+    #   PB, HG, NI, CD, AS:  fine (fuel/brake wear)
+    0: {"name": "traffic exhaust", "by_species": {
+        "OC": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
+               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
+        "BC": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
+               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
+        "DU": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
+        "SS": [{"Dg": 2.0e-6,  "sigma": 1.6, "weight": 1.0}],
+        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "default": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
+                    {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}]},
     },
-    1: {"name": "road dust", "modes": [
-            {"Dg": 1.4e-6, "sigma": 1.4, "weight": 1.0}],
+    # ── Road dust ────────────────────────────────────────────
+    #   All species are coarse mineral / salt
+    1: {"name": "road dust", "by_species": {
+        "default": [{"Dg": 1.4e-7, "sigma": 1.4, "weight": 0.5},
+                    {"Dg": 4.0e-6, "sigma": 1.6, "weight": 0.5}]},
     },
-    2: {"name": "wood combustion", "modes": [
-            {"Dg": 5.4e-8, "sigma": 1.7, "weight": 1.0}],
+    # ── Wood combustion ──────────────────────────────────────
+    #   OC, BC:                UFP + accumulation
+    #   DU:                    fly ash coarse
+    #   PB, HG, NI, CD, AS:    fine (trace metals in smoke)
+    2: {"name": "wood combustion", "by_species": {
+        "OC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
+               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
+        "BC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
+               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
+        "DU": [{"Dg": 4.0e-6, "sigma": 1.6, "weight": 1.0}],
+        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "default": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
+                    {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}]},
     },
-    3: {"name": "other", "modes": [
-            {"Dg": 60.0e-9, "sigma": 1.7, "weight": 1.0}],
-    }
-}
-
-CATEGORY_COMPOSITION = {
-    0: {"H2SO4": 0.04, "OC": 0.44, "BC": 0.44, "DU": 0.02,
-        "SS": 0.00, "HNO3": 0.06, "NH3": 0.00,
-        "PB": 0.0001, "HG": 0.00001, "NI": 0.0002, "CD": 0.00005, "AS": 0.00004},
-    1: {"H2SO4": 0.00, "OC": 0.05, "BC": 0.00, "DU": 0.90,
-        "SS": 0.00, "HNO3": 0.05, "NH3": 0.00,
-        "PB": 0.0005, "HG": 0.00002, "NI": 0.0003, "CD": 0.0001, "AS": 0.00008},
-    2: {"H2SO4": 0.00, "OC": 0.46, "BC": 0.46, "DU": 0.02,
-        "SS": 0.00, "HNO3": 0.06, "NH3": 0.00,
-        "PB": 0.00005, "HG": 0.00001, "NI": 0.0001, "CD": 0.00003, "AS": 0.0001},
-    3: {"H2SO4": 0.00, "OC": 0.44, "BC": 0.44, "DU": 0.02,
-        "SS": 0.00, "HNO3": 0.10, "NH3": 0.00,
-        "PB": 0.0001, "HG": 0.00002, "NI": 0.0002, "CD": 0.00005, "AS": 0.00008},
+    # ── Other (industry, energy, agriculture) ────────────────
+    #   OC, BC:                accumulation
+    #   DU:                    coarse mineral
+    #   PB, HG, NI, CD, AS:    accumulation (industrial)
+    3: {"name": "other", "by_species": {
+        "OC": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
+               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}],
+        "BC": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
+               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}],
+        "DU": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
+        "SS": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
+        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "default": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
+                    {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}]},
+    },
 }
 
 SPECIES_CATEGORY_MAPPING = {
-    "oc": {"target": "OC"}, "bc": {"target": "BC"}, "ec": {"target": "BC"},
+    "oc": {"target": "OC"}, "ec": {"target": "BC"}, # "bc": {"target": "BC"},
     "so4": {"target": "H2SO4"}, "no": {"target": "HNO3"}, "no2": {"target": "HNO3"},
     "nh3": {"target": "NH3"}, "othmin": {"target": "DU"},
     "pb": {"target": "PB"}, "hg": {"target": "HG"}, "ni": {"target": "NI"},
@@ -163,7 +202,8 @@ SPECIES_CATEGORY_MAPPING = {
 
 BULK_SPECIES = ['ho2', 'h2o', 'o3', 'ro2', 'oh', 'rcho', 'n2o', 
                 'nmvoc', 'voc', 'co', 'co2', 'ch4', 'pm25', 'pmcoarse',
-                'pm2_5', 'pm10', 'so4', 'nox']
+                'pm2_5', 'pm10', 'nox',
+                'no', 'no2', 'nh3', 'so4']
 
 CONFIG_PROJ = "EPSG:25832"
 DEFAULT_PROJ = "EPSG:4326"
@@ -171,12 +211,13 @@ transformer_to_utm = Transformer.from_crs(DEFAULT_PROJ, CONFIG_PROJ, always_xy=T
 transformer_to_wgs = Transformer.from_crs(CONFIG_PROJ, DEFAULT_PROJ, always_xy=True)
 
 # =============================================================================
-# GLOBAL CACHE 
+# CACHE CLEANUP
 # =============================================================================
 
-_geotiff_cache = {}
-_cache_order = []
-_MAX_CACHE_SIZE = 5
+def clear_geotiff_cache():
+    """Clear memory after processing"""
+    import gc
+    gc.collect()
 
 # Pre-compiled regex for band parsing
 BAND_PATTERN = re.compile(r'^([A-Za-z_]+)_h(\d{2})_(\d{8})$')
@@ -221,87 +262,6 @@ def parse_band_description(desc):
                           int(date_str[6:8]), hour, 0, 0)
         return sector, hour, date_str, band_dt
     return None
-
-
-# =============================================================================
-# GEOTIFF RESAMPLING 
-# =============================================================================
-
-def resample_entire_geotiff(geotiff_path, static_params):
-    """GeoTIFF resampling with LRU cache"""
-    global _geotiff_cache, _cache_order
-    
-    if geotiff_path in _geotiff_cache:
-        _cache_order.remove(geotiff_path)
-        _cache_order.insert(0, geotiff_path)
-        return _geotiff_cache[geotiff_path]
-    
-    if not os.path.exists(geotiff_path):
-        raise FileNotFoundError(f"GeoTIFF file not found: {geotiff_path}")
-    
-    print(f"  Resampling: {os.path.basename(geotiff_path)}")
-    
-    warp_options = gdal.WarpOptions(
-        format='MEM',
-        outputBounds=[static_params['west'], static_params['south'], 
-                     static_params['east'], static_params['north']],
-        width=static_params['nx'],
-        height=static_params['ny'],
-        dstSRS=CONFIG_PROJ,
-        resampleAlg=gdal.GRA_NearestNeighbour
-    )
-    
-    resampled_ds = gdal.Warp('', geotiff_path, options=warp_options)
-    
-    if resampled_ds is None:
-        raise RuntimeError(f"Failed to resample GeoTIFF: {geotiff_path}")
-    
-    # Read all bands at once
-    num_bands = resampled_ds.RasterCount
-    all_bands_data = []
-    
-    for band_num in range(1, num_bands + 1):
-        band = resampled_ds.GetRasterBand(band_num)
-        arr = band.ReadAsArray().astype(np.float32)
-        arr = np.flipud(arr)  # Match PALM coordinate system
-        all_bands_data.append(arr)
-    
-    # LRU cache management
-    if len(_cache_order) >= _MAX_CACHE_SIZE:
-        oldest = _cache_order.pop()
-        del _geotiff_cache[oldest]
-    
-    _geotiff_cache[geotiff_path] = all_bands_data
-    _cache_order.insert(0, geotiff_path)
-    
-    resampled_ds = None
-    return all_bands_data
-
-
-def read_geotiff_band(geotiff_path, band_num, static_params):
-    """band reading with cache"""
-    global _geotiff_cache
-    
-    if geotiff_path not in _geotiff_cache:
-        all_bands = resample_entire_geotiff(geotiff_path, static_params)
-    else:
-        all_bands = _geotiff_cache[geotiff_path]
-        _cache_order.remove(geotiff_path)
-        _cache_order.insert(0, geotiff_path)
-    
-    if band_num - 1 < len(all_bands):
-        return all_bands[band_num - 1].copy()
-    else:
-        raise ValueError(f"Band {band_num} not found in {geotiff_path}")
-
-
-def clear_geotiff_cache():
-    """Clear cache to free memory"""
-    global _geotiff_cache, _cache_order
-    _geotiff_cache.clear()
-    _cache_order.clear()
-    import gc
-    gc.collect()
 
 
 # =============================================================================
@@ -373,55 +333,30 @@ def lognormal_pdf(d, dg, sigma_g):
            np.exp(-(np.log(d_safe / dg)**2) / (2 * np.log(sigma_g)**2))
 
 
-def get_size_distribution_fractions(category, bin_diameters, subrange_labels, nf2a, has_2a, has_2b):
-    """Calculate number fractions"""
-    if category not in SIZE_DISTRIBUTIONS:
+def get_size_distribution_fractions(category, species, bin_diameters, subrange_labels, nf2a, has_2a, has_2b):
+    """Calculate number fractions for a specific (category, species) pair.
+    
+    NOTE: The 2a/2b split is NOT applied here.  nf2a only controls
+    whether 2b bins EXIST (bin structure).  The actual species-specific
+    split between soluble (2a) and insoluble (2b) regimes is applied
+    in _process_tiff_file_wrapper using SPECIES_2A_FRACTION.
+    """
+    cat_info = SIZE_DISTRIBUTIONS.get(category)
+    if cat_info is None:
         raise ValueError(f"Unknown category: {category}")
     
-    dist_info = SIZE_DISTRIBUTIONS[category]
-    modes = dist_info["modes"]
+    # Look up species-specific modes, fall back to default
+    species_modes = cat_info["by_species"].get(species)
+    if species_modes is None:
+        species_modes = cat_info["by_species"]["default"]
     
     pdf_values = np.zeros(len(bin_diameters))
-    for mode in modes:
+    for mode in species_modes:
         pdf_values += mode["weight"] * lognormal_pdf(bin_diameters, mode["Dg"], mode["sigma"])
     
-    fractions = pdf_values.copy()
-    if has_2a and has_2b:
-        mask_2a = subrange_labels == '2a'
-        mask_2b = subrange_labels == '2b'
-        fractions[mask_2a] *= nf2a
-        fractions[mask_2b] *= (1.0 - nf2a)
-    
+    fractions = pdf_values.copy() if pdf_values.sum() > 0 else np.ones(len(bin_diameters))
     total = np.sum(fractions)
-    return fractions / total if total > 0 else fractions
-
-
-def mass_to_number_conversion(mass_flux, species, bin_diameter, size_fraction):
-    """Mass to number conversion"""
-    if species not in species_properties:
-        raise ValueError(f"Unknown species: {species}")
-    
-    rho = species_properties[species]["rho"]
-    bin_mass_flux = mass_flux * size_fraction
-    volume = (4.0/3.0) * np.pi * (bin_diameter/2.0)**3
-    particle_mass = rho * volume
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        number_flux = np.where((particle_mass > 0) & (bin_mass_flux > 0), 
-                               bin_mass_flux / particle_mass, 0.0)
-    return number_flux
-
-
-def get_crs_from_netcdf(nc_file):
-    """Extract CRS from NetCDF"""
-    try:
-        if hasattr(nc_file, 'crs'):
-            crs_str = nc_file.crs
-            if 'EPSG' in crs_str:
-                return f"EPSG:{crs_str.split('EPSG:')[-1].split()[0]}"
-        return CONFIG_PROJ
-    except:
-        return CONFIG_PROJ
+    return fractions / total
 
 
 def extract_static_domain(static_nc):
@@ -462,221 +397,6 @@ def extract_static_domain(static_nc):
 
 
 # =============================================================================
-# TIFF PROCESSOR
-# =============================================================================
-
-class TiffProcessor:
-    """
-    TIFF processor using:
-    - Pre-compiled regex for band parsing
-    - LRU cache for resampled data
-    - GDAL Warp for fast resampling
-    - Vectorized operations
-    - Pre-computed bin volumes
-    """
-    
-    def __init__(self, static_params, nx, ny, ntime, bin_diameters, 
-                 subrange_labels, size_distributions, nf2a, has_2a, has_2b, 
-                 nbins_total, start_dt, end_dt, time_steps):
-        self.static_params = static_params
-        self.nx = nx
-        self.ny = ny
-        self.ntime = ntime
-        self.bin_diameters = bin_diameters
-        self.subrange_labels = subrange_labels
-        self.nbins = nbins_total
-        self.size_distributions = size_distributions
-        self.nf2a = nf2a
-        self.has_2a = has_2a
-        self.has_2b = has_2b
-        self.start_dt = start_dt
-        self.end_dt = end_dt
-        self.time_steps = time_steps  # Pre-computed!
-        
-        # Pre-compute time step lookup for O(1) access
-        self.time_index_lookup = {}
-        for idx, ts in enumerate(time_steps):
-            key = (ts['date'], ts['hour'])
-            self.time_index_lookup[key] = idx
-        
-        # Pre-compute bin volumes (avoid repeated calculation)
-        self.bin_volumes = np.array([
-            (4.0/3.0) * np.pi * (d/2.0)**3 for d in bin_diameters
-        ], dtype=np.float32)
-        
-        # Pre-compute conversion factor (kg/m2/yr → kg/m2/s)
-        self.conv_factor = np.float32(1.0 / (365.25 * 24 * 3600))
-    
-    def get_band_info(self, geotiff_path):
-        """
-        band info extraction using pre-compiled regex and GDAL.
-        Returns only bands within the date range, organized by time step.
-        """
-        ds = gdal.Open(geotiff_path, gdal.GA_ReadOnly)
-        if not ds:
-            return None
-        
-        # Dictionary: time_index -> list of band numbers
-        band_info = {}
-        total_bands = ds.RasterCount
-        
-        for band_num in range(1, total_bands + 1):
-            band = ds.GetRasterBand(band_num)
-            desc = band.GetDescription()
-            if desc:
-                parsed = parse_band_description(desc)
-                if parsed is not None:
-                    sector, hour, date_str, band_dt = parsed
-                    
-                    # Check if within date range
-                    if self.start_dt <= band_dt <= self.end_dt:
-                        # Get time index from pre-computed lookup
-                        time_key = (date_str, hour)
-                        time_idx = self.time_index_lookup.get(time_key)
-                        
-                        if time_idx is not None:
-                            # Get categories for this sector
-                            categories = get_category_from_band(desc)
-                            
-                            if time_idx not in band_info:
-                                band_info[time_idx] = []
-                            band_info[time_idx].append({
-                                'band_num': band_num,
-                                'categories': categories
-                            })
-        
-        ds = None
-        return band_info if band_info else None
-    
-    def process_single_file(self, tiff_file):
-        """
-        Process a single TIFF file.
-        Uses cached resampled data and vectorized operations.
-        """
-        filename = os.path.basename(tiff_file).lower()
-        
-        # Skip bulk species
-        if any(bulk in filename for bulk in BULK_SPECIES):
-            return None
-        
-        # Find matching species
-        species = None
-        for key in SPECIES_CATEGORY_MAPPING.keys():
-            if key in filename:
-                species = key
-                break
-        
-        if species is None:
-            return None
-        
-        mapping = SPECIES_CATEGORY_MAPPING.get(species)
-        if not mapping:
-            return None
-        
-        target_species = mapping["target"]
-        
-        # Get band info
-        band_info = self.get_band_info(tiff_file)
-        
-        if band_info is None:
-            print(f"\n  Skipping {filename}: No bands in date range")
-            return None
-        
-        total_bands_to_process = sum(len(bands) for bands in band_info.values())
-        
-        print(f"\n{'─'*60}")
-        print(f"File: {filename}")
-        print(f"  Species: {species} → {target_species}")
-        print(f"  Bands to process: {total_bands_to_process} (across {len(band_info)} time steps)")
-        
-        # Initialize accumulators for 4 categories
-        category_emissions = {}
-        for cat in [0, 1, 2, 3]:
-            category_emissions[cat] = np.zeros((self.ntime, self.ny, self.nx, self.nbins), 
-                                               dtype=np.float32)
-        
-        f_2a = SPECIES_2A_FRACTION.get(target_species, 0.5)
-        
-        # Pre-load resampled data (cached)
-        try:
-            all_bands_data = resample_entire_geotiff(tiff_file, self.static_params)
-        except:
-            print(f"  ERROR: Failed to resample {tiff_file}")
-            return None
-        
-        bands_processed = 0
-        
-        # Process by time step
-        for time_idx, bands in band_info.items():
-            if time_idx >= self.ntime:
-                continue
-            
-            for band_entry in bands:
-                band_num = band_entry['band_num']
-                categories = band_entry['categories']
-                
-                # Read band data from cache
-                if band_num - 1 < len(all_bands_data):
-                    mass_data = all_bands_data[band_num - 1]
-                else:
-                    continue
-                
-                if np.all(mass_data == 0):
-                    continue
-                
-                # Convert units: kg/m2/yr → kg/m2/s
-                mass_data = mass_data * self.conv_factor
-                
-                bands_processed += 1
-                
-                # Process for each category
-                for cat in categories:
-                    mass_frac = CATEGORY_COMPOSITION[cat].get(target_species, 0.0)
-                    if mass_frac <= 0:
-                        continue
-                    
-                    size_fracs = self.size_distributions[cat]
-                    species_mass = mass_data * mass_frac
-                    
-                    # Pre-compute adjusted fractions
-                    adjusted_fracs = size_fracs.copy()
-                    if self.has_2a and self.has_2b:
-                        mask_2a = self.subrange_labels == '2a'
-                        mask_2b = self.subrange_labels == '2b'
-                        adjusted_fracs[mask_2a] *= f_2a
-                        adjusted_fracs[mask_2b] *= (1.0 - f_2a)
-                    
-                    # Vectorized bin processing
-                    for bin_idx in range(self.nbins):
-                        if adjusted_fracs[bin_idx] <= 0:
-                            continue
-                        
-                        bin_mass = species_mass * adjusted_fracs[bin_idx]
-                        particle_mass = species_properties[target_species]["rho"] * self.bin_volumes[bin_idx]
-                        
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            number_flux = np.where((particle_mass > 0) & (bin_mass > 0),
-                                                   bin_mass / particle_mass, 0.0)
-                        
-                        category_emissions[cat][time_idx, :, :, bin_idx] += number_flux
-        
-        print(f"  Processed: {bands_processed} bands")
-        
-        if bands_processed == 0:
-            return None
-        
-        # Build results
-        results = {}
-        for cat in [0, 1, 2, 3]:
-            if np.any(category_emissions[cat] > 0):
-                results[f"cat_{cat}"] = category_emissions[cat]
-        results['species'] = species
-        results['target'] = target_species
-        
-        return results
-
-
-# =============================================================================
 # MULTIPROCESSING WORKER: Module-level functions (pickle-safe)
 # =============================================================================
 
@@ -684,7 +404,8 @@ _WORKER_PARAMS = None
 
 def _init_worker(static_params, nx, ny, ntime, bin_diameters, subrange_labels,
                   size_distributions, nf2a, has_2a, has_2b, nbins_total,
-                  start_dt, end_dt, time_steps, time_index_lookup):
+                  start_dt, end_dt, time_steps, time_index_lookup,
+                  selected_cat_indices, composition_name_list):
     """Initialize per-process worker data (runs once per worker).
     
     Stores all shared read-only data as module-level globals so that
@@ -707,13 +428,15 @@ def _init_worker(static_params, nx, ny, ntime, bin_diameters, subrange_labels,
         'start_dt': start_dt, 'end_dt': end_dt,
         'time_steps': time_steps,
         'time_index_lookup': time_index_lookup,
+        'selected_cat_indices': selected_cat_indices,
+        'composition_name_list': composition_name_list,
     }
     
     # Pre-compute bin volumes and conversion factor for this worker
     _WORKER_PARAMS['bin_volumes'] = np.array([
         (4.0/3.0) * np.pi * (d/2.0)**3 for d in bin_diameters
     ], dtype=np.float32)
-    _WORKER_PARAMS['conv_factor'] = np.float32(1.0 / (365.25 * 24 * 3600))
+    _WORKER_PARAMS['conv_factor'] = np.float32(1.0 / 3600.0)
     
     # Per-worker local cache (module-level, private to this process)
     _WORKER_PARAMS['_geotiff_cache'] = {}
@@ -761,6 +484,12 @@ def _process_tiff_file_wrapper(tiff_file):
         
         target_species = mapping["target"]
         
+        # Skip TIFF files whose target species is not in the output composition list
+        # (e.g., skip PB, HG, NI, CD, AS if using 7-species config)
+        if target_species not in p['composition_name_list']:
+            print(f"  Skipping {filename}: species {target_species} not in output list")
+            return None
+        
         # Get band info (open file, parse bands within date range)
         ds = gdal.Open(tiff_file, gdal.GA_ReadOnly)
         if not ds:
@@ -793,18 +522,24 @@ def _process_tiff_file_wrapper(tiff_file):
             return None
         
         total_bands_to_process = sum(len(bands) for bands in band_info.values())
-        print(f"\n{'─'*60}")
+        print(f"\n{'='*60}")
         print(f"File: {filename}")
-        print(f"  Species: {species} \u2192 {target_species}")
+        print(f"  Species: {species} -> {target_species}")
         print(f"  Bands to process: {total_bands_to_process} (across {len(band_info)} time steps)")
         
         # Only allocate categories that actually appear in this file's bands
-        # (saves ~750 MB per worker by avoiding 3 unused 260 MB arrays)
+        # AND are in the user's selected output categories
+        # (saves memory by avoiding unused category arrays)
         needed_categories = set()
         for bands_list in band_info.values():
             for entry in bands_list:
                 for cat in entry['categories']:
                     needed_categories.add(cat)
+        # Filter to only keep selected categories
+        needed_categories = needed_categories & set(p['selected_cat_indices'])
+        if not needed_categories:
+            print(f"  Skipping {filename}: No bands match selected categories")
+            return None
         category_emissions = {}
         for cat in needed_categories:
             category_emissions[cat] = np.zeros(
@@ -829,7 +564,7 @@ def _process_tiff_file_wrapper(tiff_file):
                 width=p['static_params']['nx'],
                 height=p['static_params']['ny'],
                 dstSRS=CONFIG_PROJ,
-                resampleAlg=gdal.GRA_NearestNeighbour
+                resampleAlg=gdal.GRA_Average   # mass-conserving resampling
             )
             resampled_ds = gdal.Warp('', tiff_file, options=warp_options)
             if resampled_ds is None:
@@ -851,6 +586,10 @@ def _process_tiff_file_wrapper(tiff_file):
         
         # --- Process bands (logic identical to original) ---
         bands_processed = 0
+        
+        # Initialize mass tracking for this file (across all bands)
+        mass_sums = {}
+        
         for time_idx, bands in band_info.items():
             if time_idx >= p['ntime']:
                 continue
@@ -865,16 +604,26 @@ def _process_tiff_file_wrapper(tiff_file):
                 if np.all(mass_data == 0):
                     continue
                 
+                # Convert units: kg/m2/hr -> kg/m2/s
                 mass_data = mass_data * p['conv_factor']
                 bands_processed += 1
                 
                 for cat in categories:
-                    mass_frac = CATEGORY_COMPOSITION[cat].get(target_species, 0.0)
-                    if mass_frac <= 0:
-                        continue
+                    # Track total mass for dynamic mass fraction computation
+                    # (accumulated per category + species across all bands)
+                    if cat not in mass_sums:
+                        mass_sums[cat] = {}
+                    if target_species not in mass_sums[cat]:
+                        mass_sums[cat][target_species] = 0.0
+                    mass_sums[cat][target_species] += np.sum(mass_data)
                     
-                    size_fracs = p['size_distributions'][cat]
-                    species_mass = mass_data * mass_frac
+                    # ── Species-specific size distribution ──
+                    # Get the nf for this (category, species) pair
+                    cat_dists = p['size_distributions'].get(cat, {})
+                    size_fracs = cat_dists.get(target_species)
+                    if size_fracs is None:
+                        size_fracs = cat_dists.get('default', cat_dists.get('__category_avg__'))
+                    species_mass = mass_data
                     
                     adjusted_fracs = size_fracs.copy()
                     if p['has_2a'] and p['has_2b']:
@@ -882,17 +631,28 @@ def _process_tiff_file_wrapper(tiff_file):
                         mask_2b = p['subrange_labels'] == '2b'
                         adjusted_fracs[mask_2a] *= f_2a
                         adjusted_fracs[mask_2b] *= (1.0 - f_2a)
+                        # Re-normalize to preserve total mass after 2a/2b split
+                        total_frac = np.sum(adjusted_fracs)
+                        if total_frac > 0:
+                            adjusted_fracs /= total_frac
+                    
+                    # Compute number-weighted average particle volume
+                    # This is the correct V_avg = Σ(nf_i × V_i) for the size distribution
+                    V_avg = np.sum(adjusted_fracs * p['bin_volumes'])
+                    rho = species_properties[target_species]["rho"]
+                    
+                    # Total number flux = total_mass / (density × average_volume)
+                    # Distribute by number fractions to each bin
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        total_number_flux = np.where(
+                            (V_avg > 0) & (species_mass > 0),
+                            species_mass / (rho * V_avg), 0.0
+                        )
                     
                     for bin_idx in range(p['nbins_total']):
                         if adjusted_fracs[bin_idx] <= 0:
                             continue
-                        bin_mass = species_mass * adjusted_fracs[bin_idx]
-                        particle_mass = species_properties[target_species]["rho"] * p['bin_volumes'][bin_idx]
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            number_flux = np.where(
-                                (particle_mass > 0) & (bin_mass > 0),
-                                bin_mass / particle_mass, 0.0
-                            )
+                        number_flux = total_number_flux * adjusted_fracs[bin_idx]
                         category_emissions[cat][time_idx, :, :, bin_idx] += number_flux
         
         print(f"  Processed: {bands_processed} bands")
@@ -907,6 +667,7 @@ def _process_tiff_file_wrapper(tiff_file):
                 results[f"cat_{cat}"] = cat_data
         results['species'] = species
         results['target'] = target_species
+        results['mass_sums'] = mass_sums  # for dynamic mass fraction computation
         return results
     
     except Exception as e:
@@ -991,15 +752,30 @@ class SalsaDriver:
             print(f"  Bin {i+1:2d} [{label}]: {d*1e9:.1f} nm "
                   f"[{self.bin_low[i]*1e9:.1f}-{self.bin_high[i]*1e9:.1f}] nm")
         
-        # Calculate size distributions
-        print("\nCalculating size distributions...")
+        # Calculate size distributions per species per category
+        print("\nCalculating size distributions (species-specific)...")
+        ALL_SALSA_SPECIES = list(species_properties.keys())
         self.size_distributions = {}
         for cat in [0, 1, 2, 3]:
-            dist = get_size_distribution_fractions(
-                cat, self.bin_diameters, self.subrange_labels, 
-                self.nf2a, self.has_2a, self.has_2b
-            )
-            self.size_distributions[cat] = dist
+            self.size_distributions[cat] = {}
+            cat_species = list(SIZE_DISTRIBUTIONS[cat]["by_species"].keys())
+            for sp in cat_species:
+                dist = get_size_distribution_fractions(
+                    cat, sp, self.bin_diameters, self.subrange_labels,
+                    self.nf2a, self.has_2a, self.has_2b
+                )
+                self.size_distributions[cat][sp] = dist
+            # Pre-compute category-average distribution for `size_distributions[cat]`
+            # (used in validation / number-frac output — average across species)
+            # Build a weighted average using equal weights per species
+            all_dists = list(self.size_distributions[cat].values())
+            if all_dists:
+                avg_dist = np.mean(all_dists, axis=0)
+                avg_dist /= np.sum(avg_dist)
+            else:
+                avg_dist = np.zeros(self.nbins_total)
+                avg_dist[0] = 1.0
+            self.size_distributions[cat]["__category_avg__"] = avg_dist
         
         print(f"\nCreating output file: {output_file}")
         self.nc_file = Dataset(output_file, "w", format="NETCDF4")
@@ -1104,53 +880,18 @@ class SalsaDriver:
             chars = list(name.ljust(self.nmax_string_length))
             nc_comp_name[i, :] = np.array(list(chars), dtype="S1")
 
-        # Mass fractions with exact normalization to sum=1
-        emission_mass_fracs = np.zeros((self.nncat, self.ncomposition_index), dtype=np.float64)
-        for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
-            for comp_idx, comp_name in enumerate(self.composition_name_list):
-                emission_mass_fracs[new_cat_idx, comp_idx] = \
-                    CATEGORY_COMPOSITION[old_cat_idx].get(comp_name, 0.0)
-            
-            # Exact normalization using np.float64 for maximum precision
-            total = np.sum(emission_mass_fracs[new_cat_idx, :], dtype=np.float64)
-            if total > 0:
-                # Normalize and then correct the last element to ensure exact sum=1
-                emission_mass_fracs[new_cat_idx, :] = (emission_mass_fracs[new_cat_idx, :] / total).astype(np.float64)
-                
-                # Force exact sum to 1 by adjusting the last non-zero element
-                sum_after_norm = np.sum(emission_mass_fracs[new_cat_idx, :], dtype=np.float64)
-                if abs(sum_after_norm - 1.0) > 1e-15:
-                    # Find last non-zero element to adjust
-                    for idx in range(self.ncomposition_index - 1, -1, -1):
-                        if emission_mass_fracs[new_cat_idx, idx] > 0:
-                            emission_mass_fracs[new_cat_idx, idx] += (1.0 - sum_after_norm)
-                            break
-
-        # Number fractions with exact normalization to sum=1
-        emission_num_fracs = np.zeros((self.nncat, self.nbins_total), dtype=np.float64)
-        for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
-            emission_num_fracs[new_cat_idx, :] = self.size_distributions[old_cat_idx]
-            
-            # Ensure exact sum to 1 using the last bin adjustment
-            total = np.sum(emission_num_fracs[new_cat_idx, :], dtype=np.float64)
-            if abs(total - 1.0) > 1e-15:
-                # Adjust the last bin to make sum exactly 1
-                emission_num_fracs[new_cat_idx, -1] += (1.0 - total)
-                # Re-normalize if adjustment causes negative values
-                if emission_num_fracs[new_cat_idx, -1] < 0:
-                    emission_num_fracs[new_cat_idx, :] /= total
-
-        # Convert to float32 for NetCDF storage (but maintain exact sum)
+        # Create emission_mass_fracs variable (filled dynamically after TIFF processing)
         nc_mass_fracs = self.nc_file.createVariable("emission_mass_fracs", "f4", 
                                                     ("ncat", "composition_index"), 
                                                     fill_value=-9999.0)
-        nc_mass_fracs[:] = emission_mass_fracs.astype(np.float32)
         nc_mass_fracs.units = "1"
 
+        # Create emission_number_fracs — filled AFTER emission generation
+        # with the NUMBER-WEIGHTED average (not equal-weight) so PALM
+        # reconstructs correct mass from the combined multi-species flux
         nc_num_fracs = self.nc_file.createVariable("emission_number_fracs", "f4", 
                                                     ("ncat", "Dmid"), 
                                                     fill_value=-9999.0)
-        nc_num_fracs[:] = emission_num_fracs.astype(np.float32)
         nc_num_fracs.units = "1"
 
         # Emission values
@@ -1159,9 +900,9 @@ class SalsaDriver:
                                                   fill_value=-9999.0)
         nc_aerosol.units = "#/m2/s"; nc_aerosol.lod = 2
 
-        self.generate_emission_data(nc_aerosol)
+        self.generate_emission_data(nc_aerosol, nc_num_fracs)
 
-    def generate_emission_data(self, nc_var):
+    def generate_emission_data(self, nc_var, nc_num_fracs):
         """Generate emission data"""
         print("\n" + "=" * 70)
         print("PROCESSING EMISSION TIFF FILES")
@@ -1183,8 +924,8 @@ class SalsaDriver:
             nc_var[:] = np.zeros((self.ntime, self.ny, self.nx, self.nncat))
             return
         
-        # Cap workers to prevent OOM: each worker allocates ~1 GB for a 512×512×26×10 grid
-        # (4 category arrays × 260 MB each + resampled GeoTIFF data).
+# Cap workers to prevent OOM: each worker allocates ~1 GB for a 512x512x26x10 grid
+        # (4 category arrays x 260 MB each + resampled GeoTIFF data).
         # With too many parallel workers, the system runs out of memory and kills the process.
         num_cpus = cpu_count()
         # Safe limit: each file result returned can be ~260 MB (one non-zero category);
@@ -1200,14 +941,18 @@ class SalsaDriver:
             key = (ts['date'], ts['hour'])
             time_index_lookup[key] = idx
         
-        # Initialize accumulators
+        # Initialize accumulators (only for selected categories)
         category_accumulators = {}
-        for cat in [0, 1, 2, 3]:
+        for cat in self.selected_cat_indices:
             category_accumulators[cat] = np.zeros((self.ntime, self.ny, self.nx, self.nbins_total), 
                                                   dtype=np.float32)
         
         processed_files = 0
         failed_files = 0
+        
+        # Aggregate mass sums across all TIFF files for dynamic mass fraction computation
+        # Structure: mass_sums_agg[cat][species_name] = total_mass (kg/m2/s summed over domain+time)
+        mass_sums_agg = {}
         
         with Pool(
             processes=num_processes,
@@ -1218,6 +963,8 @@ class SalsaDriver:
                 self.size_distributions, self.nf2a, self.has_2a, self.has_2b,
                 self.nbins_total, self.start_dt, self.end_dt,
                 self.time_steps, time_index_lookup,
+                self.selected_cat_indices,
+                self.composition_name_list,
             ),
             # Restart worker after each file to free ~1 GB of accumulators + cached
             # resampled data.  Without this, memory accumulates across files.
@@ -1227,29 +974,124 @@ class SalsaDriver:
             for result in pool.imap_unordered(_process_tiff_file_wrapper, tiff_files):
                 if result is not None:
                     processed_files += 1
+                    # Aggregate bin accumulators
                     for cat_key, cat_data in result.items():
                         if cat_key.startswith('cat_'):
                             cat_idx = int(cat_key.split('_')[1])
                             category_accumulators[cat_idx] += cat_data
+                    # Aggregate mass sums for dynamic fraction computation
+                    if 'mass_sums' in result:
+                        for cat, species_dict in result['mass_sums'].items():
+                            if cat not in mass_sums_agg:
+                                mass_sums_agg[cat] = {}
+                            for species_name, mass_val in species_dict.items():
+                                mass_sums_agg[cat][species_name] = \
+                                    mass_sums_agg[cat].get(species_name, 0.0) + mass_val
                 else:
                     failed_files += 1
         
         print(f"\nProcessed {processed_files} files successfully" +
               (f", {failed_files} failed" if failed_files else ""))
         
+        # ============================================================
+        # DYNAMIC MASS FRACTION COMPUTATION
+        # ============================================================
+        # Compute mass fractions from actual TIFF data:
+        #   mass_frac[cat][species] = total_mass[cat][species] / total_mass[cat]
+        # ============================================================
+        computed_mass_fracs = np.zeros(
+            (self.nncat, self.ncomposition_index), dtype=np.float64
+        )
+        
+        print(f"\n{'='*60}")
+        print("COMPUTED FRACTIONS (from TIFF data)")
+        print("="*60)
+        
+        # --- Mass fractions (per species, per category) ---
+        print(f"\n  --- MASS FRACTIONS ---")
+        print(f"  (fraction of total category mass attributed to each species)")
+        for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
+            cat_name = self.selected_cat_names[new_cat_idx]
+            cat_mass_sums = mass_sums_agg.get(old_cat_idx, {})
+            # Only sum mass for species that are in the output composition list
+            # (trace metals like PB, HG, etc. are not in the output, so exclude them)
+            total_cat_mass = sum(cat_mass_sums.get(name, 0.0) 
+                                 for name in self.composition_name_list)
+            
+            if total_cat_mass > 0:
+                print(f"\n  Category {old_cat_idx} ({cat_name}):")
+                print(f"    Total mass: {total_cat_mass:.6e} kg/m2/s "
+                      f"(output species only)")
+                for comp_idx, comp_name in enumerate(self.composition_name_list):
+                    species_mass = cat_mass_sums.get(comp_name, 0.0)
+                    frac = species_mass / total_cat_mass
+                    computed_mass_fracs[new_cat_idx, comp_idx] = frac
+                    if frac > 0:
+                        print(f"    {comp_name:<8}: {frac:.6f}  ({species_mass:.6e} kg/m2/s)")
+                mass_sum_check = np.sum(computed_mass_fracs[new_cat_idx, :])
+                print(f"    {'Sum':<8}: {mass_sum_check:.10f}  (normalized: {abs(mass_sum_check - 1.0) < 1e-6})")
+            else:
+                print(f"\n  Category {old_cat_idx} ({cat_name}): NO EMISSION DATA")
+        
+        # Write computed mass fractions to NetCDF variable
+        self.nc_file.variables['emission_mass_fracs'][:] = \
+            computed_mass_fracs.astype(np.float32)
+        
+        # ============================================================
+        
         # Create output
         aerosol_emission_values = np.zeros((self.ntime, self.ny, self.nx, self.nncat), 
                                            dtype=np.float32)
         
         print(f"\nEmission totals:")
+        n_total_cells = self.ntime * self.nx * self.ny
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             aerosol_emission_values[:, :, :, new_cat_idx] = np.sum(
                 category_accumulators[old_cat_idx], axis=3)
             
             total = np.sum(aerosol_emission_values[:, :, :, new_cat_idx])
-            print(f"  {self.selected_cat_names[new_cat_idx]:<20}: {total:.2e} #/s")
+            avg_per_cell = total / n_total_cells
+            max_val = np.max(aerosol_emission_values[:, :, :, new_cat_idx])
+            print(f"  {self.selected_cat_names[new_cat_idx]:<20}:")
+            print(f"    Total:   {total:.2e} #/s (sum over all times × cells)")
+            print(f"    Average: {avg_per_cell:.2e} #/m²/s (per cell per timestep)")
+            print(f"    Max:     {max_val:.2e} #/m²/s")
         
         nc_var[:] = aerosol_emission_values
+        
+        # ============================================================
+        # NUMBER-WEIGHTED EMISSION NUMBER FRACTIONS
+        # ============================================================
+        # PALM's LOD=2 format has ONE nf per category, but we process
+        # each species with its own nf.  For PALM to reconstruct mass
+        # correctly it needs the NUMBER-WEIGHTED average:
+        #   nf_file[bin] = Σ_species(N_species × nf_species[bin]) / N_total
+        # where N_species is the total number emitted per species.
+        # This is derived from the per-bin accumulators directly.
+        emission_num_fracs = np.zeros((self.nncat, self.nbins_total), dtype=np.float64)
+        for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
+            # Sum over time, y, x to get total number per bin
+            total_per_bin = np.sum(category_accumulators[old_cat_idx], axis=(0, 1, 2))
+            total_per_bin = total_per_bin.astype(np.float64)
+            bin_sum = np.sum(total_per_bin)
+            if bin_sum > 0:
+                nf_weighted = total_per_bin / bin_sum
+            else:
+                nf_weighted = np.ones(self.nbins_total) / self.nbins_total
+            emission_num_fracs[new_cat_idx, :] = nf_weighted
+            
+            # Print per-bin number fractions for validation
+            cat_name = self.selected_cat_names[new_cat_idx]
+            print(f"\n  --- NUMBER FRACTIONS (number-weighted, cat {old_cat_idx}: {cat_name}) ---")
+            for bin_idx in range(self.nbins_total):
+                frac = nf_weighted[bin_idx]
+                if frac > 0:
+                    d_nm = self.bin_diameters[bin_idx] * 1e9
+                    label = self.subrange_labels[bin_idx]
+                    print(f"    Bin {bin_idx+1:2d} [{label}]: {frac:.6f}  ({d_nm:.1f} nm)")
+            print(f"    {'Sum':<8}: {np.sum(nf_weighted):.10f}")
+        
+        nc_num_fracs[:] = emission_num_fracs.astype(np.float32)
         
         # Clear cache
         clear_geotiff_cache()
@@ -1288,9 +1130,9 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    static_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augs_Bourges_Platz/OUTPUT/nesting_test_static_N02"
-    tiff_dir = "/mnt/t/PhD_data/downscale/Downscale_8m_3days/"  #"/mnt/t/PhD_data/downscale/UA_CLC_100m_3days/" #"/home/vaithisa/Downscale_Emissions_simple/downscale/" #"/mnt/d/downscaled_emissions/UA_CLC_100m_3days/"
-    output_file = "/home/vaithisa/GEO4PALM-main/JOBS/Augs_Bourges_Platz/OUTPUT/nesting_test_salsa_N02"
+    static_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_static"
+    tiff_dir = "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/Downscale_10m_3days/" 
+    output_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_salsa"
     
     print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
