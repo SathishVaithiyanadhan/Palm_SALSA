@@ -89,7 +89,7 @@ The following data is required to create the chemistry driver for the PALM simul
 
 2. Run Main Script
 
-    * **python palm_salsa_driver.py** 
+    * **python palm_salsa_driver.py name.yaml** 
 
 3. Output
 
