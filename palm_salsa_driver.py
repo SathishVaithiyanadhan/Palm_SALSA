@@ -31,38 +31,44 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # =============================================================================
-# USER CONFIGURATION OPTIONS
+# USER CONFIGURATION — Loaded from YAML file passed as argument
 # =============================================================================
+# Usage:
+#   python palm_salsa_driver.py my_scenario.yaml
+
+import yaml
+import sys
+
+if len(sys.argv) < 2:
+    print("Usage: python palm_salsa_driver.py <config.yaml>")
+    sys.exit(1)
+
+CONFIG_FILE = sys.argv[1]
+
+with open(CONFIG_FILE, "r") as f:
+    _cfg = yaml.safe_load(f)
+
+# ---- Data Paths ----
+STATIC_FILE  = _cfg["paths"]["static_file"]
+TIFF_DIR     = _cfg["paths"]["tiff_dir"]
+OUTPUT_FILE  = _cfg["paths"]["output_file"]
 
 # ---- Date/Time Range for Emissions ----
-START_DATE = "2026-03-06 21:00:00"
-END_DATE   = "2026-03-09 23:00:00"
+START_DATE = _cfg["time"]["start_date"]
+END_DATE   = _cfg["time"]["end_date"]
 
-# ---- Emission Categories to Include ----
-ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood', 'other']
-# Select which emission categories to include in the output
-# Options: 'traffic', 'dust', 'wood' (any combination)
-# ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'dust', 'wood']  # All three
-# ACTIVE_OUTPUT_CATEGORIES = ['traffic', 'wood']        # Exclude road dust
-# ACTIVE_OUTPUT_CATEGORIES = ['traffic']                # Only traffic
+# ---- Emission Categories ----
+ACTIVE_OUTPUT_CATEGORIES = _cfg["active_categories"]
 
 # ---- Species Selection ----
-SPECIES_OUTPUT_MODE = "custom"
-#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
-CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "HNO3", "NH3"]
-#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS"]
-# Select species for output file
-# Option 1: Original 7 species
-# SPECIES_OUTPUT_MODE = "basic7"
+SPECIES_OUTPUT_MODE = _cfg["species_output_mode"]
+if SPECIES_OUTPUT_MODE == "custom":
+    CUSTOM_SPECIES_LIST = _cfg["custom_species_list"]
 
-# Option 2: Extended 12 species (includes Pb, Hg, Ni, Cd, As)
-# SPECIES_OUTPUT_MODE = "extended12"  # <-- Change this to "basic7" if needed
-# When using CUSTOM_SPECIES_LIST, set this to None or leave commented
-##SPECIES_OUTPUT_MODE = "custom"  # Add this line - set to None when using custom list
-
-# Or manually specify custom list (uncomment to use):
-
-#CUSTOM_SPECIES_LIST = ["H2SO4", "OC", "BC","DU", "SS", "NH3", "HNO3", "PB", "HG", "NI", "CD", "AS"]  # Extended list
+# ---- Bin Parameters (must match PALM namelist) ----
+NBIN   = _cfg["bins"]["nbin"]
+REGLIM = _cfg["bins"]["reglim"]
+NF2A   = _cfg["bins"]["nf2a"]
 
 # =============================================================================
 # CATEGORY-SPECIFIC GNFR SECTOR MAPPING
@@ -99,7 +105,7 @@ def get_category_from_band(band_name):
 
 NBIN = [3, 7]
 REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
-NF2A = 0.75
+NF2A = 0.55
 
 # Species properties for mass -> number conversion
 # DENSITIES must match PALM SALSA internal values (salsa_mod.f90 lines 212-219):
@@ -137,13 +143,16 @@ SIZE_DISTRIBUTIONS = {
                {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
         "BC": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
                {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
-        "DU": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
+        "DU": [{"Dg": 2.0e-6,  "sigma": 1.6, "weight": 0.3},   # brake wear
+               {"Dg": 4.0e-6,  "sigma": 1.6, "weight": 0.7}],  # road dust resuspension
         "SS": [{"Dg": 2.0e-6,  "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "PB": [{"Dg": 6.0e-7,  "sigma": 1.6, "weight": 1.0}],   # brake wear (coarse)
+        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # gas-phase, particulate fraction fine
+        "NI": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # engine wear + fuel oil
+               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse wear debris
+        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.6},    # tire wear (fine)
+               {"Dg": 6.0e-7,  "sigma": 1.6, "weight": 0.4}],   # brake wear (medium)
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # minor in traffic, fine
         "default": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
                     {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}]},
     },
@@ -158,18 +167,25 @@ SIZE_DISTRIBUTIONS = {
     #   DU:                    fly ash coarse
     #   PB, HG, NI, CD, AS:    fine (trace metals in smoke)
     2: {"name": "wood combustion", "by_species": {
-        "OC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
-               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
-        "BC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
-               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
+        "OC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},   # fine smoke (dominant)
+               {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},   # accumulation mode
+               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}],  # fly ash (minor)
+        "BC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},
+               {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},
+               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}],
         "DU": [{"Dg": 4.0e-6, "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "default": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
-                    {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}]},
+        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.7},    # fine smoke
+               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.3}],   # fly ash
+        "HG": [{"Dg": 1.5e-7,  "sigma": 1.7, "weight": 1.0}],   # particulate Hg, fine mode
+        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
+               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
+        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
+               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
+               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
+        "default": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},
+                    {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},
+                    {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}]},
     },
     # ── Other (industry, energy, agriculture) ────────────────
     #   OC, BC:                accumulation
@@ -182,11 +198,15 @@ SIZE_DISTRIBUTIONS = {
                {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}],
         "DU": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
         "SS": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],
+        "PB": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.6},    # smelting / battery (accum)
+               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.4}],   # coarse fugitive
+        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # coal burning, fine
+        "NI": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # oil burning, processes
+               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse industrial
+        "CD": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # waste incineration
+               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse emissions
+        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.7},    # coal burning (fine)
+               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.3}],   # smelting
         "default": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
                     {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}]},
     },
@@ -1130,18 +1150,15 @@ class SalsaDriver:
 if __name__ == "__main__":
     total_start = time.time()
     
-    static_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/WRF_paper128_nf2a/INPUT/WRF_paper128_nf2a_static"
-    tiff_dir = "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/downscale_wrfpaper_2026/" 
-    output_file = "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/WRF_paper128_nf2a/INPUT/WRF_paper128_nf2a_salsa"
-    
     print("\n" + "=" * 70)
     print("STARTING PALM-SALSA DRIVER GENERATION")
     print("=" * 70)
+    print(f"Config: {CONFIG_FILE}")
     print(f"Date: {START_DATE} to {END_DATE}")
     print(f"Categories: {ACTIVE_OUTPUT_CATEGORIES}")
     print(f"Start: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    driver = SalsaDriver(static_file, tiff_dir, output_file)
+    driver = SalsaDriver(STATIC_FILE, TIFF_DIR, OUTPUT_FILE)
     
     total_time = time.time() - total_start
     print("\n" + "=" * 70)

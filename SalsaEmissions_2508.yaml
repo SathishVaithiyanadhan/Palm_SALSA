@@ -1,0 +1,33 @@
+# =============================================================================
+# SALSA Driver Configuration
+# =============================================================================
+# Edit this file to configure emission scenarios without modifying the code.
+# One config per scenario — copy and rename for different setups.
+
+# ---- Data Paths ----
+paths:
+  static_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_static"
+  tiff_dir: "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/Downscale_10m_3days/"
+  output_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_salsa"
+
+# ---- Time Period ----
+time:
+  start_date: "2024-08-25 00:00:00"
+  end_date:   "2024-08-25 23:00:00"
+
+# ---- Emission Categories ----
+# Options: 'traffic', 'dust', 'wood', 'other' (any combination)
+active_categories: ['traffic', 'wood', 'other']
+
+# ---- Species List ----
+# "custom": use custom_species_list below
+# "basic7":  H2SO4, OC, BC, DU, SS, HNO3, NH3
+# "extended12": basic7 + PB, HG, NI, CD, AS
+species_output_mode: "custom"
+custom_species_list: ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG", "NI", "CD", "AS"]
+
+# ---- Bin Parameters (must match PALM namelist) ----
+bins:
+  nbin: [3, 7]
+  reglim: [3.9e-8, 1.56e-7, 1.0e-5]
+  nf2a: 0.55
