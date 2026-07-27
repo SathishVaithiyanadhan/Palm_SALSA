@@ -100,12 +100,8 @@ def get_category_from_band(band_name):
     return categories if categories else [3]
 
 # =============================================================================
-# CONSTANTS - DYNAMIC BIN CONFIGURATION
+# SPECIES PROPERTIES
 # =============================================================================
-
-NBIN = [3, 7]
-REGLIM = [3.9e-8, 1.56e-7, 1.0e-5]
-NF2A = 0.55
 
 # Species properties for mass -> number conversion
 # DENSITIES must match PALM SALSA internal values (salsa_mod.f90 lines 212-219):
@@ -133,83 +129,24 @@ SPECIES_2A_FRACTION = {
 }
 
 SIZE_DISTRIBUTIONS = {
-    # ── Traffic exhaust ──────────────────────────────────────
-    #   OC, BC:          ultrafine/accumulation from tailpipe
-    #   DU:              coarse from road abrasion, tire wear
-    #   SS:              fine (salt from de-icing / humidity)
-    #   PB, HG, NI, CD, AS:  fine (fuel/brake wear)
-    0: {"name": "traffic exhaust", "by_species": {
-        "OC": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
-               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
-        "BC": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
-               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}],
-        "DU": [{"Dg": 2.0e-6,  "sigma": 1.6, "weight": 0.3},   # brake wear
-               {"Dg": 4.0e-6,  "sigma": 1.6, "weight": 0.7}],  # road dust resuspension
-        "SS": [{"Dg": 2.0e-6,  "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 6.0e-7,  "sigma": 1.6, "weight": 1.0}],   # brake wear (coarse)
-        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # gas-phase, particulate fraction fine
-        "NI": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # engine wear + fuel oil
-               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse wear debris
-        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.6},    # tire wear (fine)
-               {"Dg": 6.0e-7,  "sigma": 1.6, "weight": 0.4}],   # brake wear (medium)
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # minor in traffic, fine
-        "default": [{"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.9},
-                    {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.1}]},
+    0: {"name": "traffic exhaust", "modes": [
+            {"Dg": 13.5e-9, "sigma": 1.6, "weight": 0.016},
+            {"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.800},
+            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.100}],
     },
-    # ── Road dust ────────────────────────────────────────────
-    #   All species are coarse mineral / salt
-    1: {"name": "road dust", "by_species": {
-        "default": [{"Dg": 1.4e-7, "sigma": 1.4, "weight": 0.5},
-                    {"Dg": 4.0e-6, "sigma": 1.6, "weight": 0.5}]},
+    1: {"name": "road dust", "modes": [
+            {"Dg": 1.4e-7, "sigma": 1.4, "weight": 0.5},
+            {"Dg": 4.0e-6, "sigma": 1.6, "weight": 0.5}],
     },
-    # ── Wood combustion ──────────────────────────────────────
-    #   OC, BC:                UFP + accumulation
-    #   DU:                    fly ash coarse
-    #   PB, HG, NI, CD, AS:    fine (trace metals in smoke)
-    2: {"name": "wood combustion", "by_species": {
-        "OC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},   # fine smoke (dominant)
-               {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},   # accumulation mode
-               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}],  # fly ash (minor)
-        "BC": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},
-               {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},
-               {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}],
-        "DU": [{"Dg": 4.0e-6, "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.7},    # fine smoke
-               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.3}],   # fly ash
-        "HG": [{"Dg": 1.5e-7,  "sigma": 1.7, "weight": 1.0}],   # particulate Hg, fine mode
-        "NI": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
-               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
-        "CD": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
-               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.8},    # fine smoke
-               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.2}],   # fly ash
-        "default": [{"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.80},
-                    {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.15},
-                    {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.05}]},
+    2: {"name": "wood combustion", "modes": [
+            {"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
+            {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
     },
-    # ── Other (industry, energy, agriculture) ────────────────
-    #   OC, BC:                accumulation
-    #   DU:                    coarse mineral
-    #   PB, HG, NI, CD, AS:    accumulation (industrial)
-    3: {"name": "other", "by_species": {
-        "OC": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
-               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}],
-        "BC": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
-               {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}],
-        "DU": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
-        "SS": [{"Dg": 4.0e-6,  "sigma": 1.6, "weight": 1.0}],
-        "PB": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.6},    # smelting / battery (accum)
-               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.4}],   # coarse fugitive
-        "HG": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 1.0}],   # coal burning, fine
-        "NI": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # oil burning, processes
-               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse industrial
-        "CD": [{"Dg": 3.0e-7,  "sigma": 1.6, "weight": 0.7},    # waste incineration
-               {"Dg": 1.5e-6,  "sigma": 1.4, "weight": 0.3}],   # coarse emissions
-        "AS": [{"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.7},    # coal burning (fine)
-               {"Dg": 6.0e-7,  "sigma": 1.4, "weight": 0.3}],   # smelting
-        "default": [{"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.7},
-                    {"Dg": 2.0e-7,  "sigma": 1.6, "weight": 0.3}]},
-    },
+    3: {"name": "other", "modes": [
+            {"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.5},
+            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.2},
+            {"Dg": 2.5e-6, "sigma": 1.6, "weight": 0.3}],
+    }
 }
 
 SPECIES_CATEGORY_MAPPING = {
@@ -353,30 +290,27 @@ def lognormal_pdf(d, dg, sigma_g):
            np.exp(-(np.log(d_safe / dg)**2) / (2 * np.log(sigma_g)**2))
 
 
-def get_size_distribution_fractions(category, species, bin_diameters, subrange_labels, nf2a, has_2a, has_2b):
-    """Calculate number fractions for a specific (category, species) pair.
+def get_size_distribution_fractions(category, bin_diameters, subrange_labels, nf2a, has_2a, has_2b):
+    """Calculate number fractions for a given emission category.
     
-    NOTE: The 2a/2b split is NOT applied here.  nf2a only controls
-    whether 2b bins EXIST (bin structure).  The actual species-specific
-    split between soluble (2a) and insoluble (2b) regimes is applied
-    in _process_tiff_file_wrapper using SPECIES_2A_FRACTION.
+    Uses the category-level size distribution (applies to ALL species
+    within that category).  The 2a/2b soluble/insoluble split is applied
+    later in the worker via SPECIES_2A_FRACTION.
     """
     cat_info = SIZE_DISTRIBUTIONS.get(category)
     if cat_info is None:
         raise ValueError(f"Unknown category: {category}")
     
-    # Look up species-specific modes, fall back to default
-    species_modes = cat_info["by_species"].get(species)
-    if species_modes is None:
-        species_modes = cat_info["by_species"]["default"]
-    
+    modes = cat_info["modes"]
     pdf_values = np.zeros(len(bin_diameters))
-    for mode in species_modes:
+    for mode in modes:
         pdf_values += mode["weight"] * lognormal_pdf(bin_diameters, mode["Dg"], mode["sigma"])
     
-    fractions = pdf_values.copy() if pdf_values.sum() > 0 else np.ones(len(bin_diameters))
-    total = np.sum(fractions)
-    return fractions / total
+    total = np.sum(pdf_values)
+    if total > 0:
+        return pdf_values / total
+    # Fallback: uniform distribution
+    return np.ones(len(bin_diameters)) / len(bin_diameters)
 
 
 def extract_static_domain(static_nc):
@@ -637,12 +571,9 @@ def _process_tiff_file_wrapper(tiff_file):
                         mass_sums[cat][target_species] = 0.0
                     mass_sums[cat][target_species] += np.sum(mass_data)
                     
-                    # ── Species-specific size distribution ──
-                    # Get the nf for this (category, species) pair
-                    cat_dists = p['size_distributions'].get(cat, {})
-                    size_fracs = cat_dists.get(target_species)
-                    if size_fracs is None:
-                        size_fracs = cat_dists.get('default', cat_dists.get('__category_avg__'))
+                    # ── Category-level size distribution ──
+                    # Every species in this category shares the same size distribution
+                    size_fracs = p['size_distributions'][cat]  # pre-computed array
                     species_mass = mass_data
                     
                     adjusted_fracs = size_fracs.copy()
@@ -772,30 +703,15 @@ class SalsaDriver:
             print(f"  Bin {i+1:2d} [{label}]: {d*1e9:.1f} nm "
                   f"[{self.bin_low[i]*1e9:.1f}-{self.bin_high[i]*1e9:.1f}] nm")
         
-        # Calculate size distributions per species per category
-        print("\nCalculating size distributions (species-specific)...")
-        ALL_SALSA_SPECIES = list(species_properties.keys())
+        # Calculate category-level size distributions (one per category, shared by all species)
+        print("\nCalculating size distributions (category-level)...")
         self.size_distributions = {}
         for cat in [0, 1, 2, 3]:
-            self.size_distributions[cat] = {}
-            cat_species = list(SIZE_DISTRIBUTIONS[cat]["by_species"].keys())
-            for sp in cat_species:
-                dist = get_size_distribution_fractions(
-                    cat, sp, self.bin_diameters, self.subrange_labels,
-                    self.nf2a, self.has_2a, self.has_2b
-                )
-                self.size_distributions[cat][sp] = dist
-            # Pre-compute category-average distribution for `size_distributions[cat]`
-            # (used in validation / number-frac output — average across species)
-            # Build a weighted average using equal weights per species
-            all_dists = list(self.size_distributions[cat].values())
-            if all_dists:
-                avg_dist = np.mean(all_dists, axis=0)
-                avg_dist /= np.sum(avg_dist)
-            else:
-                avg_dist = np.zeros(self.nbins_total)
-                avg_dist[0] = 1.0
-            self.size_distributions[cat]["__category_avg__"] = avg_dist
+            dist = get_size_distribution_fractions(
+                cat, self.bin_diameters, self.subrange_labels,
+                self.nf2a, self.has_2a, self.has_2b
+            )
+            self.size_distributions[cat] = dist
         
         print(f"\nCreating output file: {output_file}")
         self.nc_file = Dataset(output_file, "w", format="NETCDF4")
