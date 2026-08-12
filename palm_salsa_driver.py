@@ -132,7 +132,8 @@ SIZE_DISTRIBUTIONS = {
     0: {"name": "traffic exhaust", "modes": [
             {"Dg": 13.5e-9, "sigma": 1.6, "weight": 0.016},
             {"Dg": 60.0e-9, "sigma": 1.8, "weight": 0.800},
-            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.100}],
+            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.100},
+            {"Dg": 2.5e-6, "sigma": 1.6, "weight": 2.239e-4}],  # brake/tire wear (coarse)
     },
     1: {"name": "road dust", "modes": [
             {"Dg": 1.4e-7, "sigma": 1.4, "weight": 0.5},
@@ -140,14 +141,54 @@ SIZE_DISTRIBUTIONS = {
     },
     2: {"name": "wood combustion", "modes": [
             {"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
-            {"Dg": 2.0e-6, "sigma": 1.6, "weight": 0.4}],
+            {"Dg": 2.5e-7, "sigma": 1.6, "weight": 0.35},
+            {"Dg": 2.0e-6, "sigma": 1.5, "weight": 1.413e-3}],  # small fly-ash/coarse fraction
     },
     3: {"name": "other", "modes": [
-            {"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.5},
-            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.2},
-            {"Dg": 2.5e-6, "sigma": 1.6, "weight": 0.3}],
+            {"Dg": 60.0e-9, "sigma": 1.7, "weight": 0.45},
+            {"Dg": 3.0e-7, "sigma": 1.6, "weight": 0.40},
+            {"Dg": 1.5e-6, "sigma": 1.6, "weight": 7.499e-2}],
     }
 }
+
+# =============================================================================
+# OPTIONAL SIZE DISTRIBUTION OVERRIDE (from YAML config)
+# =============================================================================
+# If the config file contains a "size_distributions:" block it overrides the
+# per-category lognormal modes above without touching code. Only the listed
+# categories are overridden; the rest keep the defaults above.
+#
+#   size_distributions:
+#     traffic: [{Dg: 1.35e-8, sigma: 1.6, weight: 0.016}, ...]
+#     wood:    [{Dg: 5.4e-8, sigma: 1.7, weight: 0.6},
+#               {Dg: 4.0e-7, sigma: 1.5, weight: 0.4}]
+#     other:   [{Dg: 6.0e-8, sigma: 1.7, weight: 0.5}, ...]
+#
+_CATEGORY_NAME_TO_IDX = {'traffic': 0, 'dust': 1, 'wood': 2, 'other': 3}
+
+if "size_distributions" in _cfg:
+    for cat_name, modes in _cfg["size_distributions"].items():
+        cat_idx = _CATEGORY_NAME_TO_IDX.get(cat_name)
+        if cat_idx is None or cat_idx not in SIZE_DISTRIBUTIONS:
+            print(f"WARNING: ignoring unknown size_distributions category '{cat_name}'")
+            continue
+        new_modes = []
+        for m in modes:
+            try:
+                new_modes.append({
+                    "Dg": float(m["Dg"]),
+                    "sigma": float(m["sigma"]),
+                    "weight": float(m["weight"]),
+                })
+            except (KeyError, TypeError, ValueError) as e:
+                print(f"WARNING: bad size_distributions entry for '{cat_name}': "
+                      f"{m} ({e}); keeping code default")
+                new_modes = None
+                break
+        if new_modes:
+            SIZE_DISTRIBUTIONS[cat_idx]["modes"] = new_modes
+            print(f"Size distribution override applied for '{cat_name}' "
+                  f"(category {cat_idx})")
 
 SPECIES_CATEGORY_MAPPING = {
     "oc": {"target": "OC"}, "ec": {"target": "BC"}, # "bc": {"target": "BC"},
@@ -320,9 +361,6 @@ def extract_static_domain(static_nc):
     params['origin_lat'] = static_nc.getncattr('origin_lat')
     params['origin_lon'] = static_nc.getncattr('origin_lon')
     
-    center_x, center_y = transformer_to_utm.transform(
-        params['origin_lon'], params['origin_lat'])
-    
     params['nx'] = len(static_nc.dimensions['x'])
     params['ny'] = len(static_nc.dimensions['y'])
     
@@ -332,13 +370,34 @@ def extract_static_domain(static_nc):
     params['dx'] = x_coords[1] - x_coords[0] if len(x_coords) > 1 else 1.0
     params['dy'] = abs(y_coords[1] - y_coords[0]) if len(y_coords) > 1 else 1.0
     
-    half_nx = (params['nx'] - 1) * params['dx'] / 2
-    half_ny = (params['ny'] - 1) * params['dy'] / 2
+    # Absolute UTM coordinates that the (relative) x/y arrays are referenced to.
+    # Prefer the static file's origin_x / origin_y attributes; fall back to
+    # transforming origin_lon/origin_lat if they are absent.
+    try:
+        origin_x_abs = static_nc.getncattr('origin_x')
+    except AttributeError:
+        origin_x_abs, _ = transformer_to_utm.transform(
+            params['origin_lon'], params['origin_lat'])
+    try:
+        origin_y_abs = static_nc.getncattr('origin_y')
+    except AttributeError:
+        _, origin_y_abs = transformer_to_utm.transform(
+            params['origin_lon'], params['origin_lat'])
     
-    params['west'] = center_x - half_nx
-    params['east'] = center_x + half_nx
-    params['south'] = center_y - half_ny
-    params['north'] = center_y + half_ny
+    # Derive the domain bounds from the actual grid coordinates (x/y are the
+    # cell-CENTRE offsets from the origin).  This keeps the GDAL Warp window
+    # aligned with the PALM grid even when x/y start at 0 or at dx/2.  (The
+    # previous code assumed x/y were centred on the origin point, which is off
+    # by ~half the domain for the 128x128 statics -> emissions landed in the
+    # wrong quadrant.)
+    params['west']  = origin_x_abs + x_coords[0]  - params['dx'] / 2.0
+    params['east']  = origin_x_abs + x_coords[-1] + params['dx'] / 2.0
+    if y_coords[-1] >= y_coords[0]:      # y increasing northwards
+        params['south'] = origin_y_abs + y_coords[0]  - params['dy'] / 2.0
+        params['north'] = origin_y_abs + y_coords[-1] + params['dy'] / 2.0
+    else:                                 # y decreasing (south first)
+        params['south'] = origin_y_abs + y_coords[-1] - params['dy'] / 2.0
+        params['north'] = origin_y_abs + y_coords[0]  + params['dy'] / 2.0
     params['origin_x'] = params['west']
     params['origin_y'] = params['north']
     
@@ -776,12 +835,6 @@ class SalsaDriver:
 
         Dmid = self.nc_file.createVariable("Dmid", "f4", ("Dmid",))
         Dmid[:] = self.bin_diameters; Dmid.units = "m"
-        
-        Dlow = self.nc_file.createVariable("Dlow", "f4", ("Dmid",))
-        Dlow[:] = self.bin_low; Dlow.units = "m"
-        
-        Dhigh = self.nc_file.createVariable("Dhigh", "f4", ("Dmid",))
-        Dhigh[:] = self.bin_high; Dhigh.units = "m"
 
         ncat_coord = self.nc_file.createVariable("ncat", "i4", ("ncat",))
         ncat_coord[:] = np.arange(1, self.nncat + 1)
@@ -807,7 +860,7 @@ class SalsaDriver:
             chars = list(name.ljust(self.nmax_string_length))
             nc_cat_name[i, :] = np.array(list(chars), dtype="S1")
 
-        nc_cat_idx = self.nc_file.createVariable("emission_category_index", "i4", ("ncat",))
+        nc_cat_idx = self.nc_file.createVariable("emission_category_index", "i1", ("ncat",))
         nc_cat_idx[:] = np.arange(1, self.nncat + 1)
 
         nc_comp_name = self.nc_file.createVariable("composition_name", "S1",

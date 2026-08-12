@@ -6,9 +6,9 @@
 
 # ---- Data Paths ----
 paths:
-  static_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_static"
+  static_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra/INPUT/Salsa_tra_static"
   tiff_dir: "/hpc/gpfs2/home/u/vaithisa/UniA/Downscale_Emissions_simple/Downscale_10m_3days/"
-  output_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra128/INPUT/Salsa_tra128_salsa"
+  output_file: "/hpc/gpfs2/scratch/u/vaithisa/palm_25.10/palm_mbees/palm/JOBS/Salsa_tra/INPUT/Salsa_tra_salsa"
 
 # ---- Time Period ----
 time:
@@ -30,4 +30,28 @@ custom_species_list: ["H2SO4", "OC", "BC", "DU", "SS", "HNO3", "NH3", "PB", "HG"
 bins:
   nbin: [3, 7]
   reglim: [3.9e-8, 1.56e-7, 1.0e-5]
-  nf2a: 0.55
+  nf2a: 1.0
+
+# ---- Size Distributions (optional; overrides driver defaults) ----
+# Lognormal modes per emission category (only list categories to override):
+#   Dg = geometric mean diameter [m], sigma = geometric std. dev.,
+#   weight = relative NUMBER weight of the mode (number, NOT mass!).
+# NOTE: emitted mass ~ weight * Dg^3, so even a tiny coarse-mode NUMBER weight
+# carries significant mass. Values below are PM2.5/PM10-calibrated on a MASS
+# basis (physically realistic): traffic ~90% PM2.5, wood ~93% PM2.5,
+# other ~78% PM2.5. Total emitted mass is conserved; only the fine/coarse
+# split changes (more PM2.5, less PM10).
+size_distributions:
+  traffic:
+    - {Dg: 1.35e-8, sigma: 1.6, weight: 0.016}
+    - {Dg: 6.0e-8, sigma: 1.8, weight: 0.800}
+    - {Dg: 2.0e-7, sigma: 1.6, weight: 0.100}
+    - {Dg: 2.5e-6, sigma: 1.6, weight: 2.239e-4}   
+  wood:
+    - {Dg: 5.4e-8, sigma: 1.7, weight: 0.6}
+    - {Dg: 2.5e-7, sigma: 1.6, weight: 0.35}
+    - {Dg: 2.0e-6, sigma: 1.5, weight: 1.413e-3}   
+  other:
+    - {Dg: 6.0e-8, sigma: 1.7, weight: 0.45}
+    - {Dg: 3.0e-7, sigma: 1.6, weight: 0.40}
+    - {Dg: 1.5e-6, sigma: 1.6, weight: 7.499e-2}
