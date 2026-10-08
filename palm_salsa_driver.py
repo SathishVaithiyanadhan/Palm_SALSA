@@ -74,30 +74,27 @@ NF2A   = _cfg["bins"]["nf2a"]
 # CATEGORY-SPECIFIC GNFR SECTOR MAPPING
 # =============================================================================
 
+# SALSA slots: 0=traffic exhaust, 1=road dust, 2=wood combustion, 3=other.
+# PALM matches file names on the FIRST 4 CHARS only; unmatched slots are
+# silently dropped.  One size distribution per slot covers all its species.
 GNFR_SECTOR_TO_CATEGORY = {
-    'F_RoadTransport': 0,
-    'A_PublicPower': 2,
-    'B_Industry': 2,
-    'C_OtherStationaryComb': 2,
-    'D_Fugitives': 3,
+    'F_RoadTransport': 0,        # on-road exhaust, fine # slot 1 = COARSE. 
+    'B_Industry': 1,
+    'A_PublicPower': 1,
+    'D_Fugitives': 1,            # -> COARSE slot (mineral dust)
+    'L_AgriOther': 1,            # -> COARSE slot (soil dust)
+    'C_OtherStationaryComb': 2,  # incl. residential wood/coal stoves
+    'I_OffRoad': 3,              # not traffic: also lifts soil, single sector
+    'K_AgriLivestock': 3,
     'E_Solvents': 3,
     'G_Shipping': 3,
     'H_Aviation': 3,
-    'I_OffRoad': 3,
     'J_Waste': 3,
-    'K_AgriLivestock': 3,
-    'L_AgriOther': 3,
 }
 
-def get_category_from_band(band_name):
-    """category lookup"""
-    if band_name is None:
-        return [3]
-    categories = []
-    for sector_pattern, category in GNFR_SECTOR_TO_CATEGORY.items():
-        if sector_pattern in band_name:
-            categories.append(category)
-    return categories if categories else [3]
+def get_category_from_band(sector):
+    """GNFR sector -> SALSA slot.  Exact match only; unknown -> slot 3."""
+    return [GNFR_SECTOR_TO_CATEGORY.get(sector, 3)]
 
 # =============================================================================
 # SPECIES PROPERTIES
@@ -135,9 +132,11 @@ SIZE_DISTRIBUTIONS = {
             {"Dg": 2.0e-7, "sigma": 1.6, "weight": 0.100},
             {"Dg": 2.5e-6, "sigma": 1.6, "weight": 2.239e-4}],  # brake/tire wear (coarse)
     },
+    # slot 1 = COARSE slot.  Emitted mass ~ weight * Dg^3, so a tiny coarse
+    # NUMBER weight still carries most of the MASS (~28 % PM2.5 / ~72 % coarse).
     1: {"name": "road dust", "modes": [
-            {"Dg": 1.4e-7, "sigma": 1.4, "weight": 0.5},
-            {"Dg": 4.0e-6, "sigma": 1.6, "weight": 0.5}],
+            {"Dg": 2.0e-7, "sigma": 1.6, "weight": 1.0},
+            {"Dg": 4.0e-6, "sigma": 1.7, "weight": 1.0e-2}],
     },
     2: {"name": "wood combustion", "modes": [
             {"Dg": 5.4e-8, "sigma": 1.7, "weight": 0.6},
@@ -151,19 +150,10 @@ SIZE_DISTRIBUTIONS = {
     }
 }
 
-# =============================================================================
+
 # OPTIONAL SIZE DISTRIBUTION OVERRIDE (from YAML config)
-# =============================================================================
-# If the config file contains a "size_distributions:" block it overrides the
-# per-category lognormal modes above without touching code. Only the listed
-# categories are overridden; the rest keep the defaults above.
-#
-#   size_distributions:
-#     traffic: [{Dg: 1.35e-8, sigma: 1.6, weight: 0.016}, ...]
-#     wood:    [{Dg: 5.4e-8, sigma: 1.7, weight: 0.6},
-#               {Dg: 4.0e-7, sigma: 1.5, weight: 0.4}]
-#     other:   [{Dg: 6.0e-8, sigma: 1.7, weight: 0.5}, ...]
-#
+# A "size_distributions:" block in the YAML overrides the modes above per
+# category name; categories not listed keep the defaults.
 _CATEGORY_NAME_TO_IDX = {'traffic': 0, 'dust': 1, 'wood': 2, 'other': 3}
 
 if "size_distributions" in _cfg:
@@ -190,18 +180,25 @@ if "size_distributions" in _cfg:
             print(f"Size distribution override applied for '{cat_name}' "
                   f"(category {cat_idx})")
 
+# Species keys are matched EXACTLY - never as substrings.  H2SO4/HNO3/NH3 are
+# absent by design: PALM takes them from the chemistry, not from emissions.
 SPECIES_CATEGORY_MAPPING = {
-    "oc": {"target": "OC"}, "ec": {"target": "BC"}, # "bc": {"target": "BC"},
-    "so4": {"target": "H2SO4"}, "no": {"target": "HNO3"}, "no2": {"target": "HNO3"},
-    "nh3": {"target": "NH3"}, "othmin": {"target": "DU"},
+    "oc": {"target": "OC"}, "ec": {"target": "BC"},
+    "othmin": {"target": "DU"},
     "pb": {"target": "PB"}, "hg": {"target": "HG"}, "ni": {"target": "NI"},
     "cd": {"target": "CD"}, "as": {"target": "AS"}, "na": {"target": "SS"},
 }
 
-BULK_SPECIES = ['ho2', 'h2o', 'o3', 'ro2', 'oh', 'rcho', 'n2o', 
-                'nmvoc', 'voc', 'co', 'co2', 'ch4', 'pm25', 'pmcoarse',
-                'pm2_5', 'pm10', 'nox',
-                'no', 'no2', 'nh3', 'so4']
+# e.g. emission_othmin_temporal.tif -> 'othmin'.  Exact match only: substring
+# matching mis-filed ocnv/ocsv as oc and let 'no' swallow 'hno3' and 'nox'.
+SPECIES_FROM_FILENAME = re.compile(r"^emission_(.+?)_(?:temporal|yearly)\.tif$")
+
+# Files never emitted (exact names): chemistry-supplied, gases, bulk PM totals.
+BULK_SPECIES = ['ho2', 'h2o', 'o3', 'ro2', 'oh', 'rcho', 'n2o',
+                'nmvoc', 'voc', 'co', 'co2', 'ch4',
+                'h2so4', 'so4', 'hno3', 'nh3', 'so2',
+                'no', 'no2', 'nox',
+                'pm25', 'pmcoarse', 'pm2_5', 'pm10']
 
 CONFIG_PROJ = "EPSG:25832"
 DEFAULT_PROJ = "EPSG:4326"
@@ -384,12 +381,9 @@ def extract_static_domain(static_nc):
         _, origin_y_abs = transformer_to_utm.transform(
             params['origin_lon'], params['origin_lat'])
     
-    # Derive the domain bounds from the actual grid coordinates (x/y are the
-    # cell-CENTRE offsets from the origin).  This keeps the GDAL Warp window
-    # aligned with the PALM grid even when x/y start at 0 or at dx/2.  (The
-    # previous code assumed x/y were centred on the origin point, which is off
-    # by ~half the domain for the 128x128 statics -> emissions landed in the
-    # wrong quadrant.)
+    # Domain bounds from the grid coords (x/y are cell-CENTRE offsets), so the
+    # GDAL Warp window aligns with the PALM grid.  Assuming x/y were centred on
+    # the origin put emissions in the wrong quadrant for the 128x128 statics.
     params['west']  = origin_x_abs + x_coords[0]  - params['dx'] / 2.0
     params['east']  = origin_x_abs + x_coords[-1] + params['dx'] / 2.0
     if y_coords[-1] >= y_coords[0]:      # y increasing northwards
@@ -410,7 +404,7 @@ def extract_static_domain(static_nc):
 
 
 # =============================================================================
-# MULTIPROCESSING WORKER: Module-level functions (pickle-safe)
+# MULTIPROCESSING WORKER: Module-level functions 
 # =============================================================================
 
 _WORKER_PARAMS = None
@@ -478,17 +472,19 @@ def _process_tiff_file_wrapper(tiff_file):
     try:
         # --- identical logic to TiffProcessor.process_single_file ---
         
-        # Skip bulk species
-        if any(bulk in filename for bulk in BULK_SPECIES):
+        # Exact species token from the file name (see SPECIES_FROM_FILENAME)
+        match = SPECIES_FROM_FILENAME.match(filename)
+        if match is None:
             return None
-        
-        # Find matching species
-        species = None
-        for key in SPECIES_CATEGORY_MAPPING.keys():
-            if key in filename:
-                species = key
-                break
+        species_token = match.group(1)
+
+        if species_token in BULK_SPECIES:        # chemistry-supplied / gas / bulk
+            return None
+
+        species = species_token if species_token in SPECIES_CATEGORY_MAPPING else None
         if species is None:
+            print(f"  WARNING: no mapping for species '{species_token}' "
+                  f"({filename}) -> NOT emitted")
             return None
         
         mapping = SPECIES_CATEGORY_MAPPING.get(species)
@@ -521,12 +517,13 @@ def _process_tiff_file_wrapper(tiff_file):
                         time_key = (date_str, hour)
                         time_idx = p['time_index_lookup'].get(time_key)
                         if time_idx is not None:
-                            categories = get_category_from_band(desc)
+                            categories = get_category_from_band(sector)
                             if time_idx not in band_info:
                                 band_info[time_idx] = []
                             band_info[time_idx].append({
                                 'band_num': band_num,
-                                'categories': categories
+                                'categories': categories,
+                                'sector': sector,
                             })
         ds = None
         
@@ -602,6 +599,7 @@ def _process_tiff_file_wrapper(tiff_file):
         
         # Initialize mass tracking for this file (across all bands)
         mass_sums = {}
+        sector_sums = {}         # GNFR sector -> {species: mass}, audit table only
         
         for time_idx, bands in band_info.items():
             if time_idx >= p['ntime']:
@@ -620,7 +618,15 @@ def _process_tiff_file_wrapper(tiff_file):
                 # Convert units: kg/m2/hr -> kg/m2/s
                 mass_data = mass_data * p['conv_factor']
                 bands_processed += 1
-                
+
+                # --- per-sector mass (audit only; one entry per band) ---
+                sec = band_entry.get('sector')
+                if sec:
+                    if sec not in sector_sums:
+                        sector_sums[sec] = {}
+                    sector_sums[sec][target_species] = \
+                        sector_sums[sec].get(target_species, 0.0) + float(np.sum(mass_data))
+
                 for cat in categories:
                     # Track total mass for dynamic mass fraction computation
                     # (accumulated per category + species across all bands)
@@ -678,6 +684,7 @@ def _process_tiff_file_wrapper(tiff_file):
         results['species'] = species
         results['target'] = target_species
         results['mass_sums'] = mass_sums  # for dynamic mass fraction computation
+        results['sector_sums'] = sector_sums  # for the GNFR sector audit table
         return results
     
     except Exception as e:
@@ -942,6 +949,7 @@ class SalsaDriver:
         # Aggregate mass sums across all TIFF files for dynamic mass fraction computation
         # Structure: mass_sums_agg[cat][species_name] = total_mass (kg/m2/s summed over domain+time)
         mass_sums_agg = {}
+        sector_sums_agg = {}     # audit only: [sector][species] -> total mass
         
         with Pool(
             processes=num_processes,
@@ -976,6 +984,14 @@ class SalsaDriver:
                             for species_name, mass_val in species_dict.items():
                                 mass_sums_agg[cat][species_name] = \
                                     mass_sums_agg[cat].get(species_name, 0.0) + mass_val
+                    # Aggregate the per-GNFR-sector audit sums
+                    if 'sector_sums' in result:
+                        for sec, species_dict in result['sector_sums'].items():
+                            if sec not in sector_sums_agg:
+                                sector_sums_agg[sec] = {}
+                            for species_name, mass_val in species_dict.items():
+                                sector_sums_agg[sec][species_name] = \
+                                    sector_sums_agg[sec].get(species_name, 0.0) + mass_val
                 else:
                     failed_files += 1
         
@@ -1022,10 +1038,50 @@ class SalsaDriver:
             else:
                 print(f"\n  Category {old_cat_idx} ({cat_name}): NO EMISSION DATA")
         
+        # SALSA normalises each row by its own sum (salsa_mod.f90:11522).
+        # An all-zero row gives 0/0 -> NaN -> PALM aborts with
+        # 'floating invalid'.  Never write one.
+        for new_cat_idx in range(self.nncat):
+            if computed_mass_fracs[new_cat_idx, :].sum() <= 0:
+                name = self.selected_cat_names[new_cat_idx]
+                print(f"\n  WARNING: category {new_cat_idx} ({name}) has NO "
+                      f"emission data -> writing a safe dummy composition "
+                      f"(DU=1) to avoid the PALM 0/0 crash.")
+                computed_mass_fracs[new_cat_idx, :] = 0.0
+                if "DU" in self.composition_name_list:
+                    computed_mass_fracs[new_cat_idx,
+                                        self.composition_name_list.index("DU")] = 1.0
+                else:
+                    computed_mass_fracs[new_cat_idx, 0] = 1.0
+
         # Write computed mass fractions to NetCDF variable
         self.nc_file.variables['emission_mass_fracs'][:] = \
             computed_mass_fracs.astype(np.float32)
-        
+
+        # Which sector carries which species?  Drives GNFR_SECTOR_TO_CATEGORY;
+        # sectors whose mass is mostly DU belong in slot 1 (coarse).
+        # ============================================================
+        if sector_sums_agg:
+            cols = list(self.composition_name_list)
+            print(f"\n{'='*60}")
+            print("GNFR SECTOR x SPECIES AUDIT (share of that sector's aerosol mass, %)")
+            print("=" * 60)
+            hdr = f"  {'sector':<24}" + "".join(f"{c:>8}" for c in cols)
+            print(hdr)
+            print("  " + "-" * (len(hdr) - 2))
+            du_share = {}
+            for sec in sorted(sector_sums_agg):
+                vals = [sector_sums_agg[sec].get(c, 0.0) for c in cols]
+                tot = sum(vals)
+                if tot <= 0:
+                    continue
+                print(f"  {sec:<24}" + "".join(f"{100*v/tot:8.2f}" for v in vals))
+                du_share[sec] = 100.0 * sector_sums_agg[sec].get("DU", 0.0) / tot
+            print("\n  mineral-dust (DU) share per sector, %:")
+            for sec, v in sorted(du_share.items(), key=lambda kv: -kv[1]):
+                flag = "   <-- belongs in slot 1 (coarse)" if v >= 25.0 else ""
+                print(f"    {sec:<24} {v:6.1f}{flag}")
+
         # ============================================================
         
         # Create output
@@ -1051,12 +1107,8 @@ class SalsaDriver:
         # ============================================================
         # NUMBER-WEIGHTED EMISSION NUMBER FRACTIONS
         # ============================================================
-        # PALM's LOD=2 format has ONE nf per category, but we process
-        # each species with its own nf.  For PALM to reconstruct mass
-        # correctly it needs the NUMBER-WEIGHTED average:
-        #   nf_file[bin] = Σ_species(N_species × nf_species[bin]) / N_total
-        # where N_species is the total number emitted per species.
-        # This is derived from the per-bin accumulators directly.
+        # PALM's LOD=2 format allows ONE nf per category, so use the
+        # NUMBER-WEIGHTED average over species: nf = sum(N_s * nf_s) / N_total.
         emission_num_fracs = np.zeros((self.nncat, self.nbins_total), dtype=np.float64)
         for new_cat_idx, old_cat_idx in enumerate(self.selected_cat_indices):
             # Sum over time, y, x to get total number per bin
@@ -1079,6 +1131,15 @@ class SalsaDriver:
                     label = self.subrange_labels[bin_idx]
                     print(f"    Bin {bin_idx+1:2d} [{label}]: {frac:.6f}  ({d_nm:.1f} nm)")
             print(f"    {'Sum':<8}: {np.sum(nf_weighted):.10f}")
+
+            # Implied MASS split (the file stores NUMBER fractions):
+            # m_i ~ nf_i * Dmid_i^3, bins attributed by mid-diameter.
+            mf = nf_weighted * (self.bin_diameters ** 3)
+            if mf.sum() > 0:
+                mf = mf / mf.sum()
+                fine = float(mf[self.bin_diameters <= 2.5e-6].sum())
+                print(f"    -> implied MASS split: PM2.5 {100*fine:6.2f} %   "
+                      f"coarse (>2.5 um) {100*(1-fine):6.2f} %")
         
         nc_num_fracs[:] = emission_num_fracs.astype(np.float32)
         
